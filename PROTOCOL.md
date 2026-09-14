@@ -288,7 +288,8 @@ Sent whether or not the posture matches the request, so a server always knows wh
   ],
   "config": {
     "heartbeat_interval": 30,
-    "request_timeout": 300
+    "request_timeout": 86400,
+    "silence_timeout": 900
   },
   "refreshed_token": "<new JWT>"
 }
@@ -396,7 +397,17 @@ variable (`a-b` and `a.b`) fail the call rather than one overwriting the other.
 
 **`config.heartbeat_interval`**: Seconds between heartbeat pings. See [Heartbeat](#heartbeat).
 
-**`config.request_timeout`**: Maximum seconds for a single AI request before timeout.
+**`config.request_timeout`**: A wall-clock ceiling for a single AI request, in seconds. Accepted range 10–86400; `0` means the server bounds the turn itself and wants no ceiling here. Default 86400. A numeric string such as `"300"` is accepted; a value that is not a number at all is ignored and the default kept, rather than clamped to the 10-second floor.
+
+**`config.silence_timeout`**: How many seconds a turn may produce **nothing** before the CLI is presumed wedged and killed. Accepted range 10–86400; `0` disables it. Default 900. Optional — a bridge that has never heard of it keeps behaving as it did, and a server that omits it gets the default.
+
+It also sets how long the bridge waits for the server to answer a [`tool_call`](#tool-resolution-flow-cli-bridge): 90% of whichever of `silence_timeout` and `request_timeout` would end the turn first, and never more than an hour. A CLI blocked on an unanswered tool call emits nothing, so the silence clock is what ends that wait either way; stopping just short of it means the CLI gets a tool error it can report and continue from, rather than the whole turn being killed to report one failed tool.
+
+**Silence is the bound that kills, and that is the point.** A wall clock cannot tell a stuck CLI from a busy one: an assistant reading a codebase, waiting on a build or running a test suite produces nothing *of interest* for minutes at a time and is working throughout, while a turn streaming tool results continuously for five minutes is in the healthiest state a long turn has.
+
+**A long-running tool does count as silence**, so the bound must exceed the longest tool you expect. Measured against Claude Code 2.1.x: a `sleep 20` produced a **17-second gap** between CLI output lines, and the bridge emits nothing it is not given. An ordinary turn — shell commands, a written answer — went quiet for at most 4–5 seconds. So 900 covers normal work with two orders of magnitude to spare and still catches a wedged CLI, but a build that takes longer than the bound will be stopped; raise it, or set it to `0` and bound the turn on the server side. The old 300-second request timeout killed exactly that turn, punctually, mid-work — and punctuality is the tell, because a crash is never that precise. The silence clock resets on **every** frame the adapter emits: delta, tool call, tool result. `request_timeout` remains as a backstop for a server that wants a hard ceiling.
+
+When either bound fires, the bridge sends `error` with code **`silence_timeout_exceeded`** or **`request_timeout_exceeded`** and a `limit_seconds` field, then `done`. It does not surface the signal: `exited with code 143` is true, describes the mechanism rather than the decision, and leaves a consumer unable to say "stopped after 15 minutes".
 
 **`refreshed_token`** *(optional)*: Present when the server topped up an aging connection token at the handshake. The bridge replaces its current token with this value for future reconnects. See [Token lifetime](#token-lifetime).
 
@@ -1222,7 +1233,8 @@ The server also tracks heartbeats. If no `ping` is received for 2x the heartbeat
 | `provider_unavailable` | Requested CLI not installed on bridge | Server falls back or notifies user |
 | `provider_error` | CLI exited with non-zero code | Retry or notify user |
 | `session_lost` | A resume of the requested `cli_session_id` failed (session expired/cleared/created elsewhere) | Recoverable: server wipes the stored session and silently re-issues the turn fresh with history. No `done` follows |
-| `timeout` | Request exceeded `request_timeout` | Server notifies user, can retry |
+| `silence_timeout_exceeded` | Turn produced nothing for `silence_timeout` seconds; carries `limit_seconds` | Server notifies user, can retry |
+| `request_timeout_exceeded` | Turn ran past the `request_timeout` wall clock; carries `limit_seconds` | Server notifies user, can retry |
 | `bridge_disconnected` | WebSocket connection lost | Auto-reconnect with backoff |
 | `tool_error` | Tool execution failed | CLI handles gracefully in response |
 | `rate_limited` | CLI provider rate limit hit | Exponential backoff, notify user |

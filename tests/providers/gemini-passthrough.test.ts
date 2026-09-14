@@ -18,7 +18,7 @@ import { GeminiAdapter } from '../../src/providers/gemini.js';
 import type { AdapterStreamEvent } from '../../src/providers/base.js';
 
 /** Replay gemini NDJSON through the real adapter. */
-async function replay(lines: unknown[]): Promise<AdapterStreamEvent[]> {
+async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpenMs?: number; dripMs?: number } = {}): Promise<AdapterStreamEvent[]> {
   const dir = mkdtempSync(join(tmpdir(), 'gemini-'));
   const path = join(dir, 'stream.ndjson');
   writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
@@ -27,7 +27,19 @@ async function replay(lines: unknown[]): Promise<AdapterStreamEvent[]> {
     protected override spawnCli(): ChildProcessByStdio<Writable | null, Readable, Readable> {
       return spawn(
         process.execPath,
-        ['-e', 'process.stdout.write(require("fs").readFileSync(process.argv[1], "utf8"))', path],
+        [
+          '-e',
+          'const fs = require("fs");'
+          + 'const lines = fs.readFileSync(process.argv[1], "utf8").split("\\n").filter(Boolean);'
+          + 'const hold = Number(process.argv[2] || 0), drip = Number(process.argv[3] || 0);'
+          + 'let i = 0; const tick = () => {'
+          + '  if (i < lines.length) { process.stdout.write(lines[i++] + "\\n"); if (drip > 0) setTimeout(tick, drip); else tick(); }'
+          + '  else if (hold > 0) setTimeout(() => {}, hold);'
+          + '}; tick();',
+          path,
+          String(opts.holdOpenMs ?? 0),
+          String(opts.dripMs ?? 0),
+        ],
         { stdio: ['ignore', 'pipe', 'pipe'] },
       ) as ChildProcessByStdio<Writable | null, Readable, Readable>;
     }
@@ -47,6 +59,7 @@ async function replay(lines: unknown[]): Promise<AdapterStreamEvent[]> {
       workingDir: process.cwd(),
       signal: new AbortController().signal,
       requestTimeoutSeconds: 30,
+      silenceTimeoutSeconds: opts.silenceSeconds ?? 0,
       cliSessionId: null,
       attachmentDir: null,
     }, (e) => events.push(e));
@@ -129,5 +142,40 @@ describe('what Gemini reported about the turn', () => {
 
     expect(usage['input_tokens']).toBeNull();
     expect(usage['output_tokens']).toBe(5);
+  });
+});
+
+describe('the silence bound reaches the sibling adapters too', () => {
+  it('stops a gemini turn that has gone quiet, and says which bound it was', async () => {
+    // The shared helper is wired into all three adapters by the same shape of
+    // edit. Without a test on at least one sibling, that wiring could be
+    // removed and only Claude would notice.
+    const events = await replay(
+      [{ type: 'init', session_id: 's1', model: 'gemini-2.5-pro' }],
+      { silenceSeconds: 0.2, holdOpenMs: 5000 },
+    );
+
+    const error = of(events, 'error')[0]!.data as Record<string, unknown>;
+
+    expect(error['code']).toBe('silence_timeout_exceeded');
+    expect(error['limit_seconds']).toBe(0.2);
+    expect(of(events, 'done')).toHaveLength(1);
+  });
+
+  it('does NOT stop a gemini turn that keeps producing output', async () => {
+    // The wiring the clock test above cannot see: that output RESETS the clock.
+    // Removing the reset left every test green, and a gemini turn would then be
+    // killed while working — the exact bug this change exists to fix.
+    const events = await replay(
+      [
+        { type: 'init', session_id: 's1', model: 'gemini-2.5-pro' },
+        ...Array.from({ length: 10 }, (_, i) => ({ type: 'message', role: 'assistant', content: `chunk ${i} ` })),
+        { type: 'result', stats: {} },
+      ],
+      { silenceSeconds: 0.3, dripMs: 100 },
+    );
+
+    expect(of(events, 'error')).toHaveLength(0);
+    expect(of(events, 'done')).toHaveLength(1);
   });
 });
