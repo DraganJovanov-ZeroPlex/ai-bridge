@@ -224,3 +224,17 @@ describe('ToolResolver', () => {
     });
   });
 });
+
+describe('a per-call wait', () => {
+  it('overrides the configured wait for that one call', async () => {
+    // How a tool call is kept inside the time left in its turn. If the resolver
+    // ignored the argument, every call would wait the configured value again.
+    const resolver = new ToolResolver(60_000);
+    const started = Date.now();
+
+    await expect(
+      resolver.call(() => undefined, 'req', 'tc-1', 'slow', {}, 50),
+    ).rejects.toThrow(/timed out after 50ms/);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});

@@ -300,7 +300,10 @@ describe('a codex turn stopped by the bridge', () => {
         })),
         { type: 'turn.completed', usage: {} },
       ],
-      { silenceSeconds: 0.3, dripMs: 100 },
+      // 0.8 s, not 0.3: the child node process must print its first line
+      // inside the bound, and a loaded CI machine can take longer than 300 ms to
+      // spawn one. Gaps between lines stay at 100 ms, far inside either.
+      { silenceSeconds: 0.8, dripMs: 100 },
     );
 
     expect(events.filter((e) => e.event === 'error')).toHaveLength(0);

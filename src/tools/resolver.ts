@@ -44,14 +44,14 @@ export class ToolResolver {
   /**
    * Update the timeout duration (e.g. from the server's request_timeout config).
    */
-  /** The configured wait, in ms. */
-  timeoutMsValue(): number {
-    return this.timeoutMs;
-  }
-
   setTimeoutMs(ms: number): void {
     this.timeoutMs = ms;
     log.debug('Tool resolver timeout updated', { timeoutMs: ms });
+  }
+
+  /** The configured wait, in ms. */
+  timeoutMsValue(): number {
+    return this.timeoutMs;
   }
 
   /**
@@ -81,7 +81,11 @@ export class ToolResolver {
         this.pending.delete(toolCallId);
         const seconds = Math.round(timeoutMs / 1000);
         const minutes = Math.round(seconds / 60);
-        const humanDuration = seconds >= 60 ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}` : `${seconds}s`;
+        // A wait bounded by the end of its turn can be well under a second, and
+        // "timed out after 0s" reads as a bug rather than a decision.
+        const humanDuration = timeoutMs < 1000
+          ? `${timeoutMs}ms`
+          : seconds >= 60 ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}` : `${seconds}s`;
         reject(new Error(`Tool call ${toolName} (${toolCallId}) timed out after ${humanDuration}`));
       }, timeoutMs);
 

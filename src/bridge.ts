@@ -360,7 +360,7 @@ export class Bridge extends EventEmitter<BridgeEvents> {
    * static margin only held for calls made early in a turn — a call at 60 s on
    * a 300 s turn still lost the race. Only the time actually left can decide.
    */
-  private readonly turnDeadlines = new Map<string, number>();
+  private readonly turnDeadlines = new Map<string, { at: number }>();
 
   private serverConfig: ServerConfig = {
     heartbeat_interval: DEFAULT_HEARTBEAT_SECONDS,
@@ -1133,7 +1133,7 @@ export class Bridge extends EventEmitter<BridgeEvents> {
     const deadline = this.turnDeadlines.get(requestId);
     if (deadline === undefined) return undefined;
 
-    const remaining = deadline - Date.now();
+    const remaining = deadline.at - Date.now();
     // Past the deadline but not yet killed: fail the call at once rather than
     // wait on a turn that is about to end regardless.
     const remainingWait = Math.max(1, Math.floor(remaining * 0.9));
@@ -1296,7 +1296,9 @@ export class Bridge extends EventEmitter<BridgeEvents> {
     // window.
     const rawHeartbeat = message.config.heartbeat_interval;
     const clampedHeartbeat = clampHeartbeat(rawHeartbeat);
-    if (clampedHeartbeat !== rawHeartbeat) {
+    // Compared as a NUMBER: `"60"` is a valid 60 and needed no clamping, so a
+    // strict comparison against the raw string logged a false warning.
+    if (clampedHeartbeat !== toSeconds(rawHeartbeat)) {
       log.warn('Server heartbeat_interval is outside safe range — clamping', {
         received: rawHeartbeat,
         clamped: clampedHeartbeat,
@@ -1631,6 +1633,7 @@ export class Bridge extends EventEmitter<BridgeEvents> {
     // leave a live credential in the MCP server's token map for the life of
     // the process — one per refused turn, never collected — and any
     // part-downloaded attachments on disk.
+    let turnDeadline: { at: number } | null = null;
     try {
       // Where this turn runs. A refusal here throws and the turn never spawns:
       // there is deliberately no fallback to the scratch directory, because a
@@ -1684,8 +1687,13 @@ export class Bridge extends EventEmitter<BridgeEvents> {
 
       // Recorded before the adapter arms its own clock, so it errs EARLY — the
       // safe direction for a deadline a tool wait must beat.
+      // An object, so the turn that set it can recognise its own entry. A
+      // `session_lost` re-issue reuses the SAME request id while the old turn
+      // is still unwinding, and a plain delete in the old turn's `finally`
+      // removed the new turn's deadline.
       if (this.serverConfig.request_timeout > 0) {
-        this.turnDeadlines.set(request_id, Date.now() + this.serverConfig.request_timeout * 1000);
+        turnDeadline = { at: Date.now() + this.serverConfig.request_timeout * 1000 };
+        this.turnDeadlines.set(request_id, turnDeadline);
       }
 
       // Build execution context
@@ -1747,7 +1755,9 @@ export class Bridge extends EventEmitter<BridgeEvents> {
         cli_session_id: newCliSessionId,
       });
     } finally {
-      this.turnDeadlines.delete(request_id);
+      if (turnDeadline !== null && this.turnDeadlines.get(request_id) === turnDeadline) {
+        this.turnDeadlines.delete(request_id);
+      }
       // Revoke the per-spawn MCP token so a leftover CLI process cannot
       // continue invoking tools on this request_id's behalf.
       if (mcpToken) {
