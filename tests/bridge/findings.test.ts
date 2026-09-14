@@ -50,6 +50,16 @@ describe('SEC-003: Value clamping helpers', () => {
     }
   });
 
+  it('never turns a missing heartbeat into a ping every millisecond', () => {
+    // clampHeartbeat(undefined) was NaN, and setInterval(NaN) fires about every
+    // millisecond — measured at roughly 800 pings a second.
+    for (const bad of [undefined, null, NaN, 'often', '']) {
+      expect(clampHeartbeat(bad as unknown as number)).toBe(30);
+    }
+    expect(clampHeartbeat('60' as unknown as number)).toBe(60);
+    expect(clampHeartbeat(1)).toBe(5);
+  });
+
   it('treats silence_timeout the same way at both ends', () => {
     expect(clampSilenceTimeout(0)).toBe(0);
     expect(clampSilenceTimeout(-1)).toBe(10);
@@ -214,8 +224,9 @@ describe('how long the bridge waits for the server to answer a tool call', () =>
       allowedRoots: [],
       allowNative: false,
     });
-    (bridge as unknown as { toolResolver: { setTimeoutMs(v: number): void } }).toolResolver = {
+    (bridge as unknown as { toolResolver: unknown }).toolResolver = {
       setTimeoutMs: () => undefined,
+      timeoutMsValue: () => 0,
     };
     (bridge as unknown as { handleWelcome(m: unknown): void }).handleWelcome({
       type: 'welcome', session_id: 's', tools: [], config: { heartbeat_interval: 30, ...config },
@@ -322,9 +333,199 @@ describe('how long the bridge waits for the server to answer a tool call', () =>
     expect(cfg['silence_timeout']).toBe(600);
   });
 
+  it('ignores a bound that is switched off when choosing the wait', () => {
+    // `request_timeout: 0` is a documented setting. Without excluding it, the
+    // smaller "bound" was zero, the wait fell back to the hour ceiling, and a
+    // turn that dies at 900 s of silence waited 3600 s on an unanswered tool.
+    const seconds = resolverSecondsFor({ request_timeout: 0, silence_timeout: 900 });
+
+    expect(seconds).toBeLessThan(900);
+    expect(seconds).toBeGreaterThan(0);
+  });
+
+  it('keeps the default for an EMPTY string, which must not become zero', () => {
+    // Number("") is 0, and zero switches a bound off. So an empty field would
+    // have removed both clocks — the exact failure the reader exists to stop.
+    const cfg = configOf(welcomed({ request_timeout: '', silence_timeout: '  ' }));
+
+    expect(cfg['request_timeout']).toBe(86400);
+    expect(cfg['silence_timeout']).toBe(900);
+  });
+
+  it('clamps a welcome value, not just the standalone helper', () => {
+    // The clamps were only tested as functions. Skipping the clamp inside the
+    // welcome path left everything green, and -1 would then have switched off
+    // both clocks — a wedged CLI running for ever.
+    const cfg = configOf(welcomed({ request_timeout: -1, silence_timeout: -1 }));
+
+    expect(cfg['request_timeout']).toBe(10);
+    expect(cfg['silence_timeout']).toBe(10);
+  });
+
+  it('keeps a tool call from outlasting the time LEFT in its turn', () => {
+    // The wall clock runs from when the TURN started, a tool wait from when the
+    // CALL started. A static margin only held for calls made early: a call at
+    // 60 s into a 300 s turn got a 270 s wait and lost the race to the kill.
+    //
+    // The clock is pinned. Without that, `toBeLessThan(240_000)` only caught a
+    // missing margin when no millisecond passed between set and read, and a
+    // 99% margin passed anyway.
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    try {
+      const bridge = welcomed({ request_timeout: 300, silence_timeout: 900 });
+      const b = bridge as unknown as {
+        turnDeadlines: Map<string, { at: number }>;
+        toolWaitFor(id: string): number | undefined;
+        toolResolver: { timeoutMsValue(): number };
+      };
+      b.toolResolver = { timeoutMsValue: () => 270_000 } as never;
+
+      b.turnDeadlines.set('req-1', { at: Date.now() + 240_000 });
+      expect(b.toolWaitFor('req-1')).toBe(216_000);
+
+      // Past its deadline but not yet killed: fail the call at once.
+      b.turnDeadlines.set('req-2', { at: Date.now() - 5_000 });
+      expect(b.toolWaitFor('req-2')).toBe(1);
+
+      // No wall clock: the configured wait stands.
+      expect(b.toolWaitFor('req-unknown')).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('falls back to the ceiling when the server bounds nothing', () => {
     const seconds = resolverSecondsFor({ request_timeout: 0, silence_timeout: 0 });
 
     expect(seconds).toBe(3600);
+  });
+});
+
+describe('a tool call and the turn it belongs to, wired end to end', () => {
+  /** A bridge with a live-looking socket that records what it sends. */
+  function liveBridge(): { bridge: Bridge; sent: Array<Record<string, unknown>> } {
+    const bridge = new Bridge({
+      serverUrl: 'wss://example.test/ws',
+      token: 'tok',
+      providers: [],
+      adapters: new Map(),
+      sessionStorePath: null,
+      allowedRoots: [],
+      allowNative: false,
+    });
+    const sent: Array<Record<string, unknown>> = [];
+    (bridge as unknown as { ws: unknown }).ws = {
+      readyState: 1,
+      send: (payload: string) => { sent.push(JSON.parse(payload) as Record<string, unknown>); },
+    };
+
+    return { bridge, sent };
+  }
+
+  it('fails an unanswered tool call before the turn is killed, through the real handler', async () => {
+    // The arithmetic test above fills `turnDeadlines` by hand, so dropping the
+    // wiring — the handler not passing the per-turn wait, or the resolver not
+    // honouring it — left the suite green. This goes through the actual MCP
+    // handler and the actual resolver with a server that never answers.
+    const { bridge } = liveBridge();
+    const b = bridge as unknown as {
+      currentTools: Array<Record<string, unknown>>;
+      turnDeadlines: Map<string, { at: number }>;
+      toolResolver: { setTimeoutMs(ms: number): void };
+      mcpServer: { handleCall(id: string, name: string, args: unknown): Promise<unknown> };
+    };
+    b.currentTools = [{ name: 'never_answers', description: 'x', parameters: { type: 'object', properties: {} } }];
+    b.toolResolver.setTimeoutMs(10_000);
+    b.turnDeadlines.set('req-wired', { at: Date.now() + 300 });
+
+    const started = Date.now();
+    const outcome = await Promise.race([
+      b.mcpServer.handleCall('req-wired', 'never_answers', {}).then(() => 'resolved', () => 'rejected'),
+      new Promise((r) => setTimeout(() => r('still waiting'), 2_000)),
+    ]);
+
+    // Rejected well inside the turn's 300 ms — not after the configured 10 s.
+    expect(outcome).toBe('rejected');
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("records a turn's deadline while it runs and clears it after", async () => {
+    // Removing either the set or the delete left the suite green. A missing set
+    // means no tool call is ever bounded by its turn; a missing delete leaks an
+    // entry per turn for the life of the process.
+    const { bridge } = liveBridge();
+    const b = bridge as unknown as {
+      turnDeadlines: Map<string, { at: number }>;
+      serverConfig: Record<string, unknown>;
+      executeRequest(a: unknown, r: unknown, s: string | null, sig: AbortSignal): Promise<void>;
+    };
+    b.serverConfig = { heartbeat_interval: 30, request_timeout: 300, silence_timeout: 900 };
+
+    let seenDuringTurn: { at: number } | undefined;
+    const adapter = {
+      execute: async (_ctx: unknown, onEvent: (e: unknown) => void) => {
+        seenDuringTurn = b.turnDeadlines.get('req-life');
+        onEvent({ event: 'done', data: {} });
+
+        return null;
+      },
+    };
+
+    await b.executeRequest(adapter, {
+      type: 'ai_request', request_id: 'req-life', conversation_id: 'c', provider: 'claude',
+      message: 'go', system_prompt: null, options: {}, cli_session_id: null,
+    }, null, new AbortController().signal);
+
+    expect(seenDuringTurn?.at).toBeGreaterThan(Date.now());
+    expect(b.turnDeadlines.has('req-life')).toBe(false);
+  });
+
+  it('does not let a finishing turn delete the deadline of its own re-issue', async () => {
+    // A `session_lost` re-issue reuses the SAME request id while the old turn
+    // is still unwinding. A plain delete in the old turn's `finally` removed the
+    // new turn's entry, and the re-issued turn lost its bound.
+    const { bridge } = liveBridge();
+    const b = bridge as unknown as {
+      turnDeadlines: Map<string, { at: number }>;
+      serverConfig: Record<string, unknown>;
+      executeRequest(a: unknown, r: unknown, s: string | null, sig: AbortSignal): Promise<void>;
+    };
+    b.serverConfig = { heartbeat_interval: 30, request_timeout: 300, silence_timeout: 900 };
+
+    const request = {
+      type: 'ai_request', request_id: 'req-reissued', conversation_id: 'c', provider: 'claude',
+      message: 'go', system_prompt: null, options: {}, cli_session_id: null,
+    };
+
+    let releaseOld!: () => void;
+    const oldHeld = new Promise<void>((r) => { releaseOld = r; });
+    let releaseNew!: () => void;
+    const newHeld = new Promise<void>((r) => { releaseNew = r; });
+    let seenByNewAfterOldFinished: { at: number } | undefined;
+    let newStarted!: () => void;
+    const newIsRunning = new Promise<void>((r) => { newStarted = r; });
+
+    const oldTurn = b.executeRequest({
+      execute: async () => { await oldHeld; return null; },
+    }, request, null, new AbortController().signal);
+
+    const newTurn = b.executeRequest({
+      execute: async () => {
+        newStarted();
+        await newHeld;
+        seenByNewAfterOldFinished = b.turnDeadlines.get('req-reissued');
+
+        return null;
+      },
+    }, request, null, new AbortController().signal);
+
+    await newIsRunning;
+    releaseOld();
+    await oldTurn;
+    releaseNew();
+    await newTurn;
+
+    expect(seenByNewAfterOldFinished).toBeDefined();
   });
 });

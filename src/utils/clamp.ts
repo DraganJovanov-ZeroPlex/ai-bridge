@@ -30,6 +30,8 @@ export const SILENCE_TIMEOUT_MAX_S = 86400;
 /** Accepted range for the server-provided heartbeat_interval (seconds). */
 export const HEARTBEAT_MIN_S = 5;
 export const HEARTBEAT_MAX_S = 300;
+/** Used when the server sends no usable heartbeat_interval at all. */
+export const DEFAULT_HEARTBEAT_S = 30;
 
 /**
  * Clamp a raw request_timeout value (in seconds) from the server welcome
@@ -86,5 +88,12 @@ export function clampSilenceTimeout(raw: number): number {
  * message into the acceptable range [5, 300].
  */
 export function clampHeartbeat(raw: number): number {
-  return Math.min(Math.max(raw, HEARTBEAT_MIN_S), HEARTBEAT_MAX_S);
+  // Same trust problem the timeouts had. A welcome that omits the field or sends
+  // a non-number made this return NaN, and `setInterval(NaN)` fires about every
+  // millisecond — measured at roughly 800 pings a second. Unlike a timeout, zero
+  // is not "off" here; nothing sensible means "never ping".
+  const n = toSeconds(raw);
+  if (n === null) return DEFAULT_HEARTBEAT_S;
+
+  return Math.min(Math.max(n, HEARTBEAT_MIN_S), HEARTBEAT_MAX_S);
 }
