@@ -351,6 +351,17 @@ export class Bridge extends EventEmitter<BridgeEvents> {
   /** Files going out right now, so a cancel can stop one. */
   private readonly transfers = new Map<string, () => void>();
 
+  /**
+   * When each running turn's wall clock runs out, by request id (ms epoch).
+   *
+   * A tool call's wait has to finish before the turn is killed, or the CLI
+   * never gets the tool error the wait exists to produce. The wall clock runs
+   * from when the TURN started and a tool wait from when the CALL started, so a
+   * static margin only held for calls made early in a turn — a call at 60 s on
+   * a 300 s turn still lost the race. Only the time actually left can decide.
+   */
+  private readonly turnDeadlines = new Map<string, number>();
+
   private serverConfig: ServerConfig = {
     heartbeat_interval: DEFAULT_HEARTBEAT_SECONDS,
     request_timeout: DEFAULT_REQUEST_TIMEOUT_SECONDS,
@@ -475,6 +486,7 @@ export class Bridge extends EventEmitter<BridgeEvents> {
         toolCallId,
         toolName,
         args,
+        this.toolWaitFor(requestId),
       );
     });
 
@@ -1109,6 +1121,26 @@ export class Bridge extends EventEmitter<BridgeEvents> {
     );
   }
 
+  /**
+   * How long one tool call may wait, given how much of its turn is left.
+   *
+   * The configured wait is already below the turn's bounds; this also keeps it
+   * below the time REMAINING on the wall clock, with the same 10% margin, so an
+   * unanswered call surfaces as a tool error rather than losing the race to the
+   * kill. Undefined means "use the configured wait".
+   */
+  private toolWaitFor(requestId: string): number | undefined {
+    const deadline = this.turnDeadlines.get(requestId);
+    if (deadline === undefined) return undefined;
+
+    const remaining = deadline - Date.now();
+    // Past the deadline but not yet killed: fail the call at once rather than
+    // wait on a turn that is about to end regardless.
+    const remainingWait = Math.max(1, Math.floor(remaining * 0.9));
+
+    return Math.min(this.toolResolver.timeoutMsValue(), remainingWait);
+  }
+
   private async handleWelcome(message: WelcomeMessage): Promise<void> {
     // Cancel the welcome-timeout now that we've received the welcome.
     if (this.welcomeTimeoutTimer) {
@@ -1650,6 +1682,12 @@ export class Bridge extends EventEmitter<BridgeEvents> {
         signal,
       });
 
+      // Recorded before the adapter arms its own clock, so it errs EARLY — the
+      // safe direction for a deadline a tool wait must beat.
+      if (this.serverConfig.request_timeout > 0) {
+        this.turnDeadlines.set(request_id, Date.now() + this.serverConfig.request_timeout * 1000);
+      }
+
       // Build execution context
       const context: ExecutionContext = {
         request: effectiveRequest,
@@ -1709,6 +1747,7 @@ export class Bridge extends EventEmitter<BridgeEvents> {
         cli_session_id: newCliSessionId,
       });
     } finally {
+      this.turnDeadlines.delete(request_id);
       // Revoke the per-spawn MCP token so a leftover CLI process cannot
       // continue invoking tools on this request_id's behalf.
       if (mcpToken) {

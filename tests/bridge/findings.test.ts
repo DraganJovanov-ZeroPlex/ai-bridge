@@ -50,6 +50,16 @@ describe('SEC-003: Value clamping helpers', () => {
     }
   });
 
+  it('never turns a missing heartbeat into a ping every millisecond', () => {
+    // clampHeartbeat(undefined) was NaN, and setInterval(NaN) fires about every
+    // millisecond — measured at roughly 800 pings a second.
+    for (const bad of [undefined, null, NaN, 'often', '']) {
+      expect(clampHeartbeat(bad as unknown as number)).toBe(30);
+    }
+    expect(clampHeartbeat('60' as unknown as number)).toBe(60);
+    expect(clampHeartbeat(1)).toBe(5);
+  });
+
   it('treats silence_timeout the same way at both ends', () => {
     expect(clampSilenceTimeout(0)).toBe(0);
     expect(clampSilenceTimeout(-1)).toBe(10);
@@ -214,8 +224,9 @@ describe('how long the bridge waits for the server to answer a tool call', () =>
       allowedRoots: [],
       allowNative: false,
     });
-    (bridge as unknown as { toolResolver: { setTimeoutMs(v: number): void } }).toolResolver = {
+    (bridge as unknown as { toolResolver: unknown }).toolResolver = {
       setTimeoutMs: () => undefined,
+      timeoutMsValue: () => 0,
     };
     (bridge as unknown as { handleWelcome(m: unknown): void }).handleWelcome({
       type: 'welcome', session_id: 's', tools: [], config: { heartbeat_interval: 30, ...config },
@@ -320,6 +331,62 @@ describe('how long the bridge waits for the server to answer a tool call', () =>
 
     expect(cfg['request_timeout']).toBe(300);
     expect(cfg['silence_timeout']).toBe(600);
+  });
+
+  it('ignores a bound that is switched off when choosing the wait', () => {
+    // `request_timeout: 0` is a documented setting. Without excluding it, the
+    // smaller "bound" was zero, the wait fell back to the hour ceiling, and a
+    // turn that dies at 900 s of silence waited 3600 s on an unanswered tool.
+    const seconds = resolverSecondsFor({ request_timeout: 0, silence_timeout: 900 });
+
+    expect(seconds).toBeLessThan(900);
+    expect(seconds).toBeGreaterThan(0);
+  });
+
+  it('keeps the default for an EMPTY string, which must not become zero', () => {
+    // Number("") is 0, and zero switches a bound off. So an empty field would
+    // have removed both clocks — the exact failure the reader exists to stop.
+    const cfg = configOf(welcomed({ request_timeout: '', silence_timeout: '  ' }));
+
+    expect(cfg['request_timeout']).toBe(86400);
+    expect(cfg['silence_timeout']).toBe(900);
+  });
+
+  it('clamps a welcome value, not just the standalone helper', () => {
+    // The clamps were only tested as functions. Skipping the clamp inside the
+    // welcome path left everything green, and -1 would then have switched off
+    // both clocks — a wedged CLI running for ever.
+    const cfg = configOf(welcomed({ request_timeout: -1, silence_timeout: -1 }));
+
+    expect(cfg['request_timeout']).toBe(10);
+    expect(cfg['silence_timeout']).toBe(10);
+  });
+
+  it('keeps a tool call from outlasting the time LEFT in its turn', () => {
+    // The wall clock runs from when the TURN started, a tool wait from when the
+    // CALL started. A static margin only held for calls made early: a call at
+    // 60 s into a 300 s turn got a 270 s wait and lost the race to the kill.
+    const bridge = welcomed({ request_timeout: 300, silence_timeout: 900 });
+    const b = bridge as unknown as {
+      turnDeadlines: Map<string, number>;
+      toolWaitFor(id: string): number | undefined;
+      toolResolver: { timeoutMsValue(): number };
+    };
+    b.toolResolver = { timeoutMsValue: () => 270_000 } as never;
+
+    // 240 s left on the turn.
+    b.turnDeadlines.set('req-1', Date.now() + 240_000);
+    const wait = b.toolWaitFor('req-1')!;
+
+    expect(wait).toBeLessThan(240_000);
+    expect(wait).toBeGreaterThan(200_000);
+
+    // Past its deadline but not yet killed: fail the call at once.
+    b.turnDeadlines.set('req-2', Date.now() - 5_000);
+    expect(b.toolWaitFor('req-2')).toBeLessThanOrEqual(1);
+
+    // No wall clock: the configured wait stands.
+    expect(b.toolWaitFor('req-unknown')).toBeUndefined();
   });
 
   it('falls back to the ceiling when the server bounds nothing', () => {

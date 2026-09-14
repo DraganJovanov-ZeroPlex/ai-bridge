@@ -20,7 +20,7 @@ import type { AdapterStreamEvent } from '../../src/providers/base.js';
 const SERVER_FRAME_CAP = 1024 * 1024;
 
 /** Replay codex NDJSON through the real adapter. */
-async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpenMs?: number } = {}): Promise<AdapterStreamEvent[]> {
+async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpenMs?: number; dripMs?: number } = {}): Promise<AdapterStreamEvent[]> {
   const dir = mkdtempSync(join(tmpdir(), 'codex-'));
   const path = join(dir, 'stream.ndjson');
   writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
@@ -35,7 +35,7 @@ async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpe
           + 'let i = 0; const tick = () => {'
           + '  if (i < lines.length) { process.stdout.write(lines[i++] + "\\n"); if (drip > 0) setTimeout(tick, drip); else tick(); }'
           + '  else if (hold > 0) setTimeout(() => {}, hold);'
-          + '}; tick();', path, String(opts.holdOpenMs ?? 0), '0'],
+          + '}; tick();', path, String(opts.holdOpenMs ?? 0), String(opts.dripMs ?? 0)],
         { stdio: ['ignore', 'pipe', 'pipe'] },
       ) as ChildProcessByStdio<Writable | null, Readable, Readable>;
     }
@@ -285,5 +285,25 @@ describe('a codex turn stopped by the bridge', () => {
 
     expect(error['code']).toBe('silence_timeout_exceeded');
     expect(error['limit_seconds']).toBe(0.2);
+  });
+
+  it('does NOT stop a codex turn that keeps producing output', async () => {
+    // The timeout test above proves the clock fires; only this proves OUTPUT
+    // resets it. Removing Codex's reset left every test green, and a busy Codex
+    // turn would then be killed while working — the bug this change fixes.
+    const events = await replay(
+      [
+        { type: 'thread.started', thread_id: 't1' },
+        ...Array.from({ length: 10 }, (_, i) => ({
+          type: 'item.completed',
+          item: { id: `m${i}`, type: 'agent_message', text: `chunk ${i}` },
+        })),
+        { type: 'turn.completed', usage: {} },
+      ],
+      { silenceSeconds: 0.3, dripMs: 100 },
+    );
+
+    expect(events.filter((e) => e.event === 'error')).toHaveLength(0);
+    expect(events.filter((e) => e.event === 'done')).toHaveLength(1);
   });
 });

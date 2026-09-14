@@ -44,6 +44,11 @@ export class ToolResolver {
   /**
    * Update the timeout duration (e.g. from the server's request_timeout config).
    */
+  /** The configured wait, in ms. */
+  timeoutMsValue(): number {
+    return this.timeoutMs;
+  }
+
   setTimeoutMs(ms: number): void {
     this.timeoutMs = ms;
     log.debug('Tool resolver timeout updated', { timeoutMs: ms });
@@ -57,6 +62,9 @@ export class ToolResolver {
    * @param toolCallId Unique ID for this tool invocation.
    * @param toolName   Name of the tool being called.
    * @param args       Tool arguments.
+   * @param timeoutMs  How long THIS call may wait, when the caller knows better
+   *                   than the configured default — e.g. because the turn it
+   *                   belongs to ends sooner. Defaults to the configured value.
    * @returns The tool result from the server.
    * @throws If the server returns a tool_error or the call times out.
    */
@@ -66,15 +74,16 @@ export class ToolResolver {
     toolCallId: string,
     toolName: string,
     args: Record<string, unknown>,
+    timeoutMs: number = this.timeoutMs,
   ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(toolCallId);
-        const seconds = Math.round(this.timeoutMs / 1000);
+        const seconds = Math.round(timeoutMs / 1000);
         const minutes = Math.round(seconds / 60);
         const humanDuration = seconds >= 60 ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}` : `${seconds}s`;
         reject(new Error(`Tool call ${toolName} (${toolCallId}) timed out after ${humanDuration}`));
-      }, this.timeoutMs);
+      }, timeoutMs);
 
       this.pending.set(toolCallId, {
         toolCallId,
