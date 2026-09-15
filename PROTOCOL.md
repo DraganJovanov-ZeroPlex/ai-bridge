@@ -669,6 +669,37 @@ The bridge acknowledges receipt before starting the CLI process, echoing the ses
 ```
 
 **`cli_session_id`**: The `cli_session_id` from the `ai_request` (the session being resumed, or `null` for a fresh start). Informational. The *resulting* session id — the one created or continued — is reported later on the `done` event.
+### Server → Bridge: `cancel`
+
+Stop a turn that is running, and leave a session that can be resumed.
+
+```json
+{
+  "type": "cancel",
+  "request_id": "req_abc123"
+}
+```
+
+This is the other half of `ai_request` — a person pressing stop, or the server noticing an abort flag mid-turn. Without it the only thing that can end a turn is a bound, and every bridge-side bound is measured in minutes.
+
+The bridge does what it does when one of its own bounds fires: it ends the CLI's turn (SIGINT, escalating only if that is ignored), keeps everything the turn produced, closes any open block, and sends the turn's own `done`. A cancelled turn is not an error and is not reported as one.
+
+**An unknown `request_id` is ignored, not answered.** A cancel arriving just after the turn ended is the ordinary race — somebody pressed stop as the answer landed — and there is nothing left to report about it.
+
+### Bridge → Server: `cancelled`
+
+The turn named by a `cancel` has stopped.
+
+```json
+{
+  "type": "cancelled",
+  "request_id": "req_abc123"
+}
+```
+
+**Sent after the turn's own events, not on receipt of the cancel.** The CLI is asked to stop rather than shot, so it commonly writes a little more on the way out; a server treats `cancelled` as terminal, so a reply that went out first would cut off the partial answer that stopping cleanly exists to keep.
+
+Sent only in response to a `cancel`. A turn ended by one of the bridge's own bounds reports a timeout on the `error` event and ends with `done`, like any other turn.
 
 ---
 
@@ -1381,6 +1412,7 @@ The bridge maps all of these to the unified `block_start` / `block_delta` / `blo
 | `stream` (done) | Response complete |
 | `stream` (error) | Error during streaming |
 | `tool_call` | CLI invoked a server-side tool (via callback) |
+| `cancelled` | A turn stopped because the server asked |
 | `local_result` | Answering a `local_call`, run or refused |
 | `error` | Request-level error (non-streaming) |
 
@@ -1391,6 +1423,7 @@ The bridge maps all of these to the unified `block_start` / `block_delta` / `blo
 | `welcome` | After receiving `hello` |
 | `pong` | After receiving `ping` |
 | `ai_request` | New AI request for a conversation |
+| `cancel` | Stop a turn that is running |
 | `tool_resolve` | Returning tool execution result |
 | `tool_error` | Tool execution failed |
 | `local_call` | Asking the bridge to run one tool on this machine |

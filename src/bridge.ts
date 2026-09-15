@@ -378,6 +378,11 @@ export class Bridge extends EventEmitter<BridgeEvents> {
   private isShuttingDown = false;
   private activeRequests = new Map<string, AbortController>();
   /**
+   * Turns the server asked to stop, until each one has finished stopping. See
+   * cancelRequest() for why the answer waits.
+   */
+  private readonly cancelledRequests = new Set<string>();
+  /**
    * Request IDs aborted because the WebSocket dropped while they were in
    * flight. No terminal event could be sent over the closed socket, so on the
    * next welcome these are replayed as terminal errors to release the
@@ -925,9 +930,42 @@ export class Bridge extends EventEmitter<BridgeEvents> {
       case 'stream_cancel':
         this.cancelTransfer((message as unknown as { id: string }).id);
         break;
+      case 'cancel':
+        this.cancelRequest((message as unknown as { request_id: string }).request_id);
+        break;
       default:
         log.warn('Unknown message type received', { type: (message as { type: string }).type });
     }
+  }
+
+  /**
+   * Stop a turn because the server asked.
+   *
+   * The same mechanism a bound uses -- abort the request, which ends the CLI's
+   * turn and lets the adapter finalize whatever it had -- so a cancelled turn
+   * and a timed-out one leave the session in the same resumable state.
+   *
+   * An id that is not running is not an error. A cancel racing the answer it
+   * was meant to stop is the ordinary case, and answering it would tell the
+   * server about a turn that has already been reported.
+   *
+   * The `cancelled` reply waits for the turn to finish unwinding rather than
+   * going out on receipt: the CLI is asked to stop, not shot, so it usually
+   * writes a little more before it goes, and the server treats `cancelled` as
+   * terminal. Answering immediately would throw away the tail of the very
+   * partial answer that stopping cleanly exists to keep.
+   */
+  private cancelRequest(requestId: string): void {
+    const controller = this.activeRequests.get(requestId);
+    if (!controller) {
+      log.debug('Cancel for a request that is not running', { requestId });
+
+      return;
+    }
+
+    log.info('Server asked to stop this turn', { requestId });
+    this.cancelledRequests.add(requestId);
+    controller.abort();
   }
 
   private onClose(code: number, reason: Buffer): void {
@@ -1578,6 +1616,12 @@ export class Bridge extends EventEmitter<BridgeEvents> {
       })
       .finally(() => {
         this.activeRequests.delete(request_id);
+        // Last, and only if the server asked for it: everything the turn
+        // produced has been sent by now, and this is the frame the server
+        // treats as the end of a cancelled turn.
+        if (this.cancelledRequests.delete(request_id)) {
+          this.send({ type: 'cancelled', request_id });
+        }
         this.emit('request_end', request_id);
       });
   }
