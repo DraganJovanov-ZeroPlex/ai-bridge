@@ -444,9 +444,11 @@ try {
     //
     // No assertion on whether a long tool trips the bound: that depends on what
     // the model decides to do, which varies run to run, and a test whose result
-    // the model chooses is not a test. Measured at 5.2s across a turn that ran
-    // `sleep 25`, so Claude Code keeps talking often enough that ordinary work
-    // never resembles silence — which is the property the bound relies on.
+    // the model chooses is not a test. An ordinary turn's longest gap measures
+    // in the low seconds, which is the property the bound relies on — but a
+    // long tool DOES count as silence: a direct probe of `sleep 20` produced a
+    // 17-second gap between output lines, and the bridge emits nothing it is
+    // not given.
     check('a real turn never goes quiet for anything like the silence bound',
       r.maxSilenceMs < 60_000,
       `longest gap between frames: ${(r.maxSilenceMs / 1000).toFixed(1)}s`);
@@ -484,6 +486,50 @@ try {
     check('...and the first chunk arrives well before the turn ends',
       times.length > 0 && times[0] < r.turnMs * 0.9,
       `first delta at ${times[0]}ms of ${r.turnMs}ms`);
+
+    // The incident, reproduced: a background task outliving its turn makes the
+    // CLI answer its own `<task-notification>` first on the next --resume, and
+    // that notification's `result` used to end the turn before the real answer
+    // had started. It cost two empty replies in a row in production, and no
+    // unit test can show the CLI actually behaving this way.
+    r = await turn({
+      request: aiRequest({
+        working_dir: repo,
+        message: "Start `sleep 300` as a background shell task with run_in_background, then end your turn with the single word OK.",
+      }),
+      args: allow,
+      timeoutMs: 300_000,
+    });
+    const leftoverSession = r.doneData?.cli_session_id ?? null;
+    check('a turn can leave a background task running', typeof leftoverSession === 'string',
+      `no session id came back: ${JSON.stringify(r.doneData).slice(0, 200)}`);
+
+    r = await turn({
+      request: aiRequest({
+        working_dir: repo,
+        cli_session_id: leftoverSession,
+        message: 'Reply with exactly: MAGIC-QUEUED-8823',
+      }),
+      args: allow,
+      timeoutMs: 300_000,
+    });
+    // FIRST: did the shape under test actually occur? Without the queued
+    // notification this scenario is an ordinary turn, and every check below it
+    // would pass against the bug it is named for. A failure here means the
+    // reproduction did not reproduce — not that the fix regressed.
+    check('the queued notification really was in this turn',
+      r.log.includes('"origin":"task-notification"'),
+      'no notification result appeared; the checks below prove nothing about the fix');
+
+    check('the turn after it is answered, not swallowed by the queued notification',
+      r.text.includes('MAGIC-QUEUED-8823'),
+      `assistant said: ${JSON.stringify(r.text).slice(0, 200)}`);
+    check('...and the turn reported is the real one, not the notification',
+      (r.doneData?.num_turns ?? 0) > 0 && (r.doneData?.usage?.output_tokens ?? 0) > 0,
+      `done said: ${JSON.stringify(r.doneData).slice(0, 200)}`);
+    check('...and nothing arrived after the turn had ended',
+      !r.log.includes('were dropped'),
+      'the bridge logged frames dropped after settle');
   }
 } finally {
   rmSync(root, { recursive: true, force: true });

@@ -117,6 +117,17 @@ export function createFinalizer(opts: {
   onBeforeFinalize?: () => void;
   /** Why the CLI was killed on purpose, if it was. */
   getTimeout?: () => { reason: string; limitSeconds: number } | null;
+  /**
+   * Last chance to end the turn properly when the CLI exited cleanly without
+   * one of our terminal events.
+   *
+   * Returns true if it emitted `done` itself, in which case nothing else is
+   * reported. An adapter that holds a terminal frame back — because it could
+   * not yet tell whether that frame ended OUR prompt or some queued work of
+   * the CLI's own — uses this to settle from the frame it kept rather than
+   * telling the server the turn produced nothing.
+   */
+  recoverTerminal?: () => boolean;
 }): { onRlClose: () => void; onChildClose: (code: number | null) => void } {
   let rlClosed = false;
   let childExitCode: number | null = null;
@@ -161,7 +172,7 @@ export function createFinalizer(opts: {
         },
       });
       opts.onEvent({ event: 'done', data: {} });
-    } else {
+    } else if (opts.recoverTerminal?.() !== true) {
       // Clean exit but no terminal event — emit a non-fatal error.
       opts.onEvent({
         event: 'error',

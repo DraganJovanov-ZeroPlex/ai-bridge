@@ -280,6 +280,17 @@ export class ClaudeAdapter extends ProviderAdapter {
       let model: string | null = null;
       let providerVersion: string | null = null;
       let settled = false;
+      /**
+       * A `result` that belongs to the CLI's own queued work, kept in case no
+       * other one arrives. See the `origin` handling below.
+       */
+      let heldResult: Record<string, unknown> | null = null;
+      /**
+       * Frames that arrived after the turn ended. Zero on a healthy turn, and
+       * the one number that says how much of an answer was lost when it is not
+       * — the per-frame warnings say which, never how many.
+       */
+      let droppedAfterSettle = 0;
 
       // Owns the turn's block indices. Both paths allocate from it: partial
       // streaming handles the main agent, while sub-agent messages arrive only
@@ -377,6 +388,35 @@ export class ClaudeAdapter extends ProviderAdapter {
             ? { reason, limitSeconds }
             : null;
         },
+        // The CLI exited cleanly having produced only results we judged to be
+        // its own queued work. That judgement was wrong, or the CLI changed:
+        // report the last one rather than "the AI returned no response", which
+        // would throw away a turn we have in hand.
+        recoverTerminal: () => {
+          if (heldResult === null) return false;
+
+          log.warn('No result answered our prompt — settling from the last held one', {
+            requestId,
+            sessionId,
+            origin: queuedWorkOrigin(heldResult),
+          });
+          // A held result that FAILED still has to read as a failure. Falling
+          // through to a bare `done` would turn the CLI reporting an error into
+          // a turn that merely produced nothing.
+          if (heldResult['is_error'] === true) {
+            const errs = Array.isArray(heldResult['errors']) ? heldResult['errors'] : [];
+            const errText = errs.length > 0
+              ? errs.join('; ')
+              : String(heldResult['subtype'] ?? 'Claude reported an error');
+            onEvent({
+              event: 'error',
+              data: { code: resumeAwareErrorCode(context.cliSessionId, errText), message: errText },
+            });
+          }
+          onEvent({ event: 'done', data: doneDataFrom(heldResult, model, providerVersion) });
+
+          return true;
+        },
       });
 
       // Parse NDJSON from stdout line by line
@@ -426,6 +466,7 @@ export class ClaudeAdapter extends ProviderAdapter {
                 .filter((e) => typeof e === 'object' && e !== null && e['type'] === 'tool_result')
                 .map((e) => e['tool_use_id'])
               : [];
+            droppedAfterSettle++;
             log.warn('Tool result received after stream settled — dropping', {
               requestId, sessionId, toolCallIds: ids,
             });
@@ -472,7 +513,11 @@ export class ClaudeAdapter extends ProviderAdapter {
         if (type === 'stream_event') {
           // Nothing may follow `done`. Today's CLI puts `result` last, but a
           // late frame would otherwise emit block events onto a finished turn.
-          if (settled) return;
+          if (settled) {
+            droppedAfterSettle++;
+
+            return;
+          }
           mapper.handle(parsed, onEvent);
           if (!mapper.hasOpenBlock()) flushDeferred();
           return;
@@ -482,6 +527,7 @@ export class ClaudeAdapter extends ProviderAdapter {
           // A late readline-buffered assistant event can arrive after the
           // stream is already settled; log it for diagnosis.
           if (settled) {
+            droppedAfterSettle++;
             log.debug('Assistant event received after stream settled — dropping', { sessionId });
             return;
           }
@@ -627,6 +673,45 @@ export class ClaudeAdapter extends ProviderAdapter {
           // Extract final session ID and usage from result
           sessionId = (parsed['session_id'] as string) ?? sessionId;
 
+          const origin = queuedWorkOrigin(parsed);
+          log.info('Claude result frame', {
+            requestId,
+            sessionId,
+            subtype: parsed['subtype'],
+            numTurns: parsed['num_turns'],
+            durationMs: parsed['duration_ms'],
+            isError: parsed['is_error'] === true,
+            origin,
+            endsTurn: origin === null,
+          });
+
+          if (origin !== null) {
+            // Not our prompt. One `claude -p` invocation can run more than one
+            // turn: work the CLI queues for ITSELF runs first, and each of
+            // those ends with a `result` of its own. The one that bites is a
+            // background task left running by an earlier turn — on the next
+            // --resume the CLI answers its own `<task-notification>` before it
+            // dequeues the message we sent, and that notification's result
+            // arrives within ~70ms, carrying zero usage and no text.
+            //
+            // Settling on it ended the turn before the answer had started. The
+            // server received a `done` with zero tokens, the real reply was
+            // dropped frame by frame ("tool result received after stream
+            // settled"), and the person saw an empty message — then saw it
+            // again on the retry, because the notification was still queued.
+            //
+            // The CLI stamps those with `origin` (`{"kind":"task-notification"}`)
+            // and leaves the result that answers OUR prompt unstamped, measured
+            // against 2.1.x. Hold it: if the CLI exits without ever producing an
+            // unstamped result, `recoverTerminal` settles from this rather than
+            // reporting an empty turn, so an origin we have not seen before
+            // costs the turn nothing worse than the delay until the process
+            // exits (~600ms, measured).
+            heldResult = parsed;
+
+            return;
+          }
+
           // An error `result` (e.g. subtype "error_during_execution") must NOT
           // be reported as a successful `done` — that silently drops the turn.
           // When the request tried to RESUME a session and the CLI could not
@@ -733,6 +818,14 @@ export class ClaudeAdapter extends ProviderAdapter {
 
       child.on('close', (code) => {
         log.debug('Claude process closed', { code, sessionId });
+        // A turn that ended early loses everything that came after it, and the
+        // per-frame warnings never add up to how much. One number, at the only
+        // point where it is final.
+        if (droppedAfterSettle > 0) {
+          log.warn('Frames arrived after the turn had ended and were dropped', {
+            requestId, sessionId, count: droppedAfterSettle,
+          });
+        }
         clearRequestTimeout(timeoutTimer);
         finalizer.onChildClose(code);
       });
@@ -843,6 +936,26 @@ function describePart(part: unknown): string {
 }
 
 /**
+ * Which queued work of the CLI's own a `result` frame closes, if it is not ours.
+ *
+ * The bridge sends exactly one prompt per invocation, so a result that names an
+ * origin at all belongs to something the CLI queued for itself — today a
+ * `<task-notification>` for a background shell command an earlier turn left
+ * running. The result that answers our prompt carries no `origin`.
+ *
+ * @returns the origin's kind, or null when the frame ends our own turn
+ */
+function queuedWorkOrigin(result: Record<string, unknown>): string | null {
+  const origin = result['origin'];
+  if (typeof origin !== 'object' || origin === null) return null;
+  const kind = (origin as Record<string, unknown>)['kind'];
+
+  // An origin we cannot name is still an origin, and the frame is still not
+  // ours. `recoverTerminal` is what makes that safe to act on.
+  return typeof kind === 'string' && kind !== '' ? kind : 'unknown';
+}
+
+/**
  * What the CLI reported about a turn, whether it succeeded or failed.
  *
  * @param result the CLI's `result` frame
@@ -864,6 +977,12 @@ function doneDataFrom(
     model,
     provider_version: providerVersion,
     stop_reason: typeof result['stop_reason'] === 'string' ? result['stop_reason'] : null,
+    // Why the turn ended, in the CLI's own words: "success",
+    // "error_during_execution", "error_max_turns". A turn that comes back empty
+    // is the case this exists for — `stop_reason` is null on several of those
+    // paths, and without this the server has nothing to show but a blank
+    // message.
+    subtype: typeof result['subtype'] === 'string' ? result['subtype'] : null,
     cost_usd: num(result['total_cost_usd']),
     duration_ms: num(result['duration_ms']),
     duration_api_ms: num(result['duration_api_ms']),

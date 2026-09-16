@@ -669,6 +669,7 @@ The bridge acknowledges receipt before starting the CLI process, echoing the ses
 ```
 
 **`cli_session_id`**: The `cli_session_id` from the `ai_request` (the session being resumed, or `null` for a fresh start). Informational. The *resulting* session id — the one created or continued — is reported later on the `done` event.
+
 ### Server → Bridge: `cancel`
 
 Stop a turn that is running, and leave a session that can be resumed.
@@ -1073,6 +1074,7 @@ Signals the end of the AI response. No more events for this `request_id`.
     "duration_ms": 7034,
     "duration_api_ms": 7597,
     "num_turns": 3,
+    "subtype": "success",
     "permission_denials": [],
     "cli_session_id": "session_def456"
   }
@@ -1093,6 +1095,7 @@ Everything beside `usage` is likewise provider-reported and optional. **Absent m
 | `cost_usd` | What the provider says the turn cost. |
 | `duration_ms` / `duration_api_ms` | Wall-clock duration of the turn, and of the API portion. |
 | `num_turns` | How many assistant turns the CLI took internally to answer. |
+| `subtype` | How the CLI itself classified the end of the turn — `success`, `error_during_execution`, `error_max_turns`. Worth showing when a turn arrives with no text at all: `stop_reason` is null on several of those paths, so this is the only thing that says what happened. |
 | `permission_denials` | Tool calls the CLI's own permission system refused. In `isolated` this is the record of what the posture actually stopped — an empty answer with three denials reads very differently from an empty answer with none. |
 
 `cli_session_id` is the CLI session this turn ran under — the id created on a fresh start, or the id resumed. The server persists it on the conversation so the next turn can resume. Absent/`null` when no session id was produced.
@@ -1393,6 +1396,10 @@ Each provider outputs differently. The bridge normalizes:
 ```
 
 The bridge maps all of these to the unified `block_start` / `block_delta` / `block_stop` event model defined in [Streaming Events](#streaming-events).
+
+**One invocation can run more than one turn, and only one of them is yours.** Claude Code answers work it queued for *itself* before it dequeues the message the bridge sent — a `<task-notification>` for a background shell command an earlier turn left running, say — and each of those turns ends with a `result` frame of its own. Those frames carry an `origin` (`{"kind":"task-notification"}`); the result that answers the bridge's prompt does not. The bridge ends the turn on the unstamped one, so a server sees exactly one `done`, reporting the turn it asked for.
+
+Treating the first `result` as terminal is what this replaces, and it was not a theoretical fault: the notification's result arrives within ~70ms with zero usage and no text, so the turn ended before the answer had started, the real reply was dropped frame by frame, and the person saw an empty message — then saw it again on the retry.
 
 ---
 
