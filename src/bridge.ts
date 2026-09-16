@@ -1571,6 +1571,12 @@ export class Bridge extends EventEmitter<BridgeEvents> {
         // a resumed turn, where the branch below turns ANY failure into
         // `session_lost`: the server would wipe the session and silently
         // re-issue the very turn somebody had just stopped.
+        //
+        // The cost: a POLICY refusal that happens to race a cancel — a refused
+        // working directory, an attachment on another host — loses its code and
+        // is reported as a turn that simply ended. Nothing ran either way, the
+        // reason is in the log line below, and the refusal recurs on the next
+        // attempt, so what is lost is a diagnostic rather than an enforcement.
         if (controller.signal.aborted) {
           log.info('Request failed after it was cancelled — reporting the cancel', {
             requestId: request_id,

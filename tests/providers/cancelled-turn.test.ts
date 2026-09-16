@@ -38,6 +38,8 @@ async function run(opts: {
   /** Lines the CLI writes on its way out, after `lateAfterMs`. */
   lateLines?: unknown[];
   lateAfterMs?: number;
+  /** A bound of the bridge's own, for the twin of the cancel case. */
+  silenceTimeoutSeconds?: number;
 }): Promise<AdapterStreamEvent[]> {
   const scratch = mkdtempSync(join(tmpdir(), 'cancelled-'));
   const path = join(scratch, 'stream.ndjson');
@@ -96,7 +98,7 @@ async function run(opts: {
       workingDir: process.cwd(),
       signal: controller.signal,
       requestTimeoutSeconds: 30,
-      silenceTimeoutSeconds: 0,
+      silenceTimeoutSeconds: opts.silenceTimeoutSeconds ?? 0,
       cliSessionId: null,
       attachmentDir: null,
     }, (e) => events.push(e));
@@ -168,6 +170,60 @@ describe('a turn that was stopped on purpose', () => {
     expect(of(events, 'error')).toHaveLength(0);
     expect(of(events, 'done')).toHaveLength(1);
     expect(of(events, 'block_stop')).toHaveLength(1);
+  });
+
+  it('keeps a turn the CLI queued for itself out of a cancelled turn report', async () => {
+    // The order of two branches in the finalizer, which nothing else checks.
+    // A cancel landing when the only `result` so far belonged to the CLI's own
+    // queued work must not fall through to the recovery that settles from a
+    // held frame: that would report `done` with zero turns and zero cost — an
+    // empty reply that reads as a successful one, which is the fault this whole
+    // release exists to remove, arriving by another road.
+    const events = await run({
+      lines: [
+        INIT,
+        {
+          type: 'result', subtype: 'success', is_error: false, session_id: 's1',
+          origin: { kind: 'task-notification' },
+          num_turns: 0, duration_ms: 71, total_cost_usd: 0, result: '',
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+        ...MID_SENTENCE,
+      ],
+      abortAfterMs: 150,
+    });
+
+    const done = of(events, 'done');
+    expect(done).toHaveLength(1);
+    expect(of(events, 'error')).toHaveLength(0);
+    // Bare, not the notification's numbers. `undefined` and `0` are different
+    // answers here: one says nothing was reported, the other reports a turn
+    // that cost nothing.
+    expect((done[0]!.data as Record<string, unknown>)['num_turns']).toBeUndefined();
+  });
+
+  it('reports a bound that stopped the turn, not the error the CLI wrote on the way out', async () => {
+    // The twin of the cancel case, and the one that was still broken: a bound
+    // kills with the same SIGINT, so the CLI writes the same error result — but
+    // a bound never touches the abort signal, so the adapter settled the turn
+    // with `provider_error` and the finalizer's timeout branch never ran. The
+    // server was told the CLI had failed, and never learned the bridge had
+    // stopped it or what the limit was.
+    const events = await run({
+      lines: [INIT, ...MID_SENTENCE],
+      abortAfterMs: null,
+      silenceTimeoutSeconds: 0.2,
+      lateLines: [{
+        type: 'result', subtype: 'error_during_execution', is_error: true,
+        session_id: 's1', num_turns: 1, duration_ms: 3, usage: {},
+      }],
+    });
+
+    const errors = of(events, 'error').map((e) => e.data as { code: string; limit_seconds?: number });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.code).toBe('silence_timeout_exceeded');
+    expect(errors[0]!.limit_seconds).toBe(0.2);
+    expect(of(events, 'done')).toHaveLength(1);
   });
 
   it('still reports a CLI that failed on its own', async () => {

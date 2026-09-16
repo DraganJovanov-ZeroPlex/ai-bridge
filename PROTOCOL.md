@@ -685,7 +685,9 @@ This is the other half of `ai_request` — a person pressing stop, or the server
 
 The bridge does what it does when one of its own bounds fires: it ends the CLI's turn (SIGINT, escalating only if that is ignored), keeps everything the turn produced, closes any open block, and sends the turn's own `done`.
 
-**A cancelled turn is not reported as an error**, in any of the three ways one could have leaked out: the CLI exiting non-zero because the signal landed mid-tool, the CLI writing an error `result` on its way out, and the cancel interrupting the work that runs *before* the CLI (an attachment download, say). The last one mattered most on a resumed turn, where a failure is what `session_lost` is read from — the server would have wiped the session and silently re-issued the turn somebody had just stopped.
+**A cancelled turn is not reported as an error.** Three paths used to say otherwise and no longer do: the CLI exiting non-zero because the signal landed mid-tool, the CLI writing an error `result` on its way out, and the cancel interrupting the work that runs *before* the CLI (an attachment download, say). The last mattered most on a resumed turn, where a failure is what `session_lost` is read from — the server would have wiped the session and silently re-issued the turn somebody had just stopped.
+
+A turn stopped by one of the bridge's own bounds is reported the other way round, and deliberately: `silence_timeout_exceeded` or `request_timeout_exceeded` with `limit_seconds`, because the server did not ask for that and has no other way to learn it happened.
 
 **An unknown `request_id` is ignored, not answered.** A cancel arriving just after the turn ended is the ordinary race — somebody pressed stop as the answer landed — and there is nothing left to report about it.
 

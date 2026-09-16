@@ -727,6 +727,28 @@ export class ClaudeAdapter extends ProviderAdapter {
           // find it, surface `session_lost` so the server recovers by
           // re-issuing the turn fresh; any other error is a plain provider_error.
           if (parsed['is_error'] === true) {
+            // Unless WE stopped this turn, in which case the reason is ours and
+            // not the CLI's. A claude leaving a SIGINT commonly writes an error
+            // result on its way out, and both things that send it one — a
+            // cancel and a bound — would otherwise be reported here as the turn
+            // having failed.
+            //
+            // Not settled, and nothing emitted: the finalizer already knows how
+            // to end both, and settling here is precisely what stopped it. It
+            // says `silence_timeout_exceeded` with the limit for a bound, and a
+            // bare `done` for a cancel; this path could only ever have said
+            // `provider_error`, so the server never learned the bridge had
+            // stopped the turn at all.
+            if (signal.aborted || timeouts?.reason() != null) {
+              log.info('Ignoring an error result written on the way out', {
+                requestId,
+                subtype: parsed['subtype'],
+                because: signal.aborted ? 'cancelled' : timeouts?.reason(),
+              });
+
+              return;
+            }
+
             const errs = Array.isArray(parsed['errors']) ? parsed['errors'] : [];
             const errText = errs.length > 0
               ? errs.join('; ')
@@ -736,21 +758,13 @@ export class ClaudeAdapter extends ProviderAdapter {
             // finalizer's onBeforeFinalize never runs and anything still open
             // would never be closed.
             settleBlocks();
-            // Unless somebody stopped this turn. A CLI on its way out of a
-            // SIGINT may write an error result as it goes, and reporting that
-            // would tell the server the turn failed when what happened is that
-            // it was cancelled. The finalizer makes the same distinction; it
-            // never gets the chance here, because this path settles the turn
-            // itself.
-            if (!signal.aborted) {
-              onEvent({
-                event: 'error',
-                data: {
-                  code: resumeAwareErrorCode(context.cliSessionId, errText),
-                  message: errText,
-                },
-              });
-            }
+            onEvent({
+              event: 'error',
+              data: {
+                code: resumeAwareErrorCode(context.cliSessionId, errText),
+                message: errText,
+              },
+            });
             // The SAME metadata as a successful turn. A turn that fails still
             // spent tokens and money — often more than one that succeeds — and
             // this reported `{}`, so the cost of exactly the turns worth
