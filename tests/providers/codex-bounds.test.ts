@@ -20,10 +20,19 @@ import type { AdapterStreamEvent } from '../../src/providers/base.js';
 const SERVER_FRAME_CAP = 1024 * 1024;
 
 /** Replay codex NDJSON through the real adapter. */
-async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpenMs?: number; dripMs?: number } = {}): Promise<AdapterStreamEvent[]> {
+async function replay(
+  lines: unknown[],
+  opts: {
+    silenceSeconds?: number; holdOpenMs?: number; dripMs?: number;
+    /** What the CLI writes on its way out, once it is asked to stop. */
+    lateLines?: unknown[];
+  } = {},
+): Promise<AdapterStreamEvent[]> {
   const dir = mkdtempSync(join(tmpdir(), 'codex-'));
   const path = join(dir, 'stream.ndjson');
   writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const latePath = join(dir, 'late.ndjson');
+  writeFileSync(latePath, (opts.lateLines ?? []).map((l) => JSON.stringify(l)).join('\n') + '\n');
 
   class Replay extends CodexAdapter {
     protected override spawnCli(): ChildProcessByStdio<Writable | null, Readable, Readable> {
@@ -32,10 +41,16 @@ async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpe
         ['-e', 'const fs = require("fs");'
           + 'const lines = fs.readFileSync(process.argv[1], "utf8").split("\\n").filter(Boolean);'
           + 'const hold = Number(process.argv[2] || 0), drip = Number(process.argv[3] || 0);'
+          // SIGINT is how the bridge asks a CLI to stop, and a CLI asked to
+          // stop often writes one last frame before it goes. That frame is the
+          // whole point of these tests, so the fake has to produce it.
+          + 'const late = fs.readFileSync(process.argv[4], "utf8").trim();'
+          + 'process.on("SIGINT", () => { if (late) process.stdout.write(late + "\\n");'
+          + '  setTimeout(() => process.exit(130), 50); });'
           + 'let i = 0; const tick = () => {'
           + '  if (i < lines.length) { process.stdout.write(lines[i++] + "\\n"); if (drip > 0) setTimeout(tick, drip); else tick(); }'
           + '  else if (hold > 0) setTimeout(() => {}, hold);'
-          + '}; tick();', path, String(opts.holdOpenMs ?? 0), String(opts.dripMs ?? 0)],
+          + '}; tick();', path, String(opts.holdOpenMs ?? 0), String(opts.dripMs ?? 0), latePath],
         { stdio: ['ignore', 'pipe', 'pipe'] },
       ) as ChildProcessByStdio<Writable | null, Readable, Readable>;
     }
@@ -285,6 +300,29 @@ describe('a codex turn stopped by the bridge', () => {
 
     expect(error['code']).toBe('silence_timeout_exceeded');
     expect(error['limit_seconds']).toBe(0.2);
+  });
+
+  it('does not report the error codex writes on its way out', async () => {
+    // The exposure this branch created: all three adapters now stop a CLI with
+    // SIGINT rather than SIGTERM, and SIGINT is the signal that makes a CLI
+    // wind down gracefully -- which means writing a final error frame. Reported
+    // as-is, that tells a server the turn FAILED when the bridge stopped it,
+    // and the bound's own reason and limit never arrive.
+    const events = await replay(
+      [{ type: 'thread.started', thread_id: 't1' }],
+      {
+        silenceSeconds: 0.2,
+        holdOpenMs: 5000,
+        lateLines: [{ type: 'error', message: 'interrupted by user' }],
+      },
+    );
+
+    const errors = events.filter((e) => e.event === 'error').map((e) => e.data as Record<string, unknown>);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!['code']).toBe('silence_timeout_exceeded');
+    expect(errors[0]!['limit_seconds']).toBe(0.2);
+    expect(events.filter((e) => e.event === 'done')).toHaveLength(1);
   });
 
   it('does NOT stop a codex turn that keeps producing output', async () => {

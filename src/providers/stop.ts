@@ -36,6 +36,28 @@ const GRACE_MS = 5_000;
  * conversation left holding a process forever is worse than a session that
  * needs replaying.
  */
+/**
+ * Did WE stop this turn — a server's cancel, or one of our own bounds?
+ *
+ * If so, the reason belongs to the bridge and not to the CLI, and an adapter
+ * must not report what the CLI says on its way out. SIGINT is the signal that
+ * asks a CLI to wind down rather than killing it outright, which is exactly why
+ * it commonly writes one last error frame before it goes: "interrupted",
+ * "error_during_execution". Reporting that tells a server the turn FAILED, when
+ * what happened is that it was stopped — and on a resumed turn an error is what
+ * `session_lost` is read from, so the server would wipe the session and
+ * re-issue the turn somebody had just stopped.
+ *
+ * Shared rather than repeated per adapter: this is four branches across three
+ * CLIs, and the next adapter would be the fifth place to forget it.
+ *
+ * @param signal the turn's abort signal — a server cancel, a disconnect
+ * @param timeouts the turn's clocks, if it has any
+ */
+export function stoppedByUs(signal: AbortSignal, timeouts: { reason(): string | null } | null): boolean {
+  return signal.aborted || (timeouts?.reason() ?? null) !== null;
+}
+
 export function stopTurn(child: ChildProcess, why: { requestId: string; provider: string }): void {
   if (child.exitCode !== null || child.signalCode !== null) return;
 

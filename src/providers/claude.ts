@@ -38,7 +38,7 @@ import { boundArguments, replaceLoneSurrogateEscapes, safeStringify, toolResultE
 import { ClaudePartialStreamMapper } from './claude-partial.js';
 import { supportsPartialMessages, noteCliRejectedPartialFlag } from './claude-capabilities.js';
 import { createLogger, isDebugEnabled } from '../utils/logger.js';
-import { stopTurn } from './stop.js';
+import { stopTurn, stoppedByUs } from './stop.js';
 
 /**
  * Known Claude CLI model aliases.
@@ -739,7 +739,7 @@ export class ClaudeAdapter extends ProviderAdapter {
             // bare `done` for a cancel; this path could only ever have said
             // `provider_error`, so the server never learned the bridge had
             // stopped the turn at all.
-            if (signal.aborted || timeouts?.reason() != null) {
+            if (stoppedByUs(signal, timeouts)) {
               log.info('Ignoring an error result written on the way out', {
                 requestId,
                 subtype: parsed['subtype'],
