@@ -668,7 +668,11 @@ export class ClaudeAdapter extends ProviderAdapter {
         if (type === 'result') {
           // A second `result` would otherwise emit a second `done`, completing
           // the server's request twice.
-          if (settled) return;
+          if (settled) {
+            droppedAfterSettle++;
+
+            return;
+          }
 
           // Extract final session ID and usage from result
           sessionId = (parsed['session_id'] as string) ?? sessionId;
@@ -707,6 +711,11 @@ export class ClaudeAdapter extends ProviderAdapter {
             // reporting an empty turn, so an origin we have not seen before
             // costs the turn nothing worse than the delay until the process
             // exits (~600ms, measured).
+            //
+            // The stamp is on the RESULT, so that is what this holds back. A
+            // queued turn that wrote something would have its content forwarded
+            // like any other frame; today they make no API call and produce
+            // none, which is why they are invisible apart from ending here.
             heldResult = parsed;
 
             return;
@@ -727,13 +736,21 @@ export class ClaudeAdapter extends ProviderAdapter {
             // finalizer's onBeforeFinalize never runs and anything still open
             // would never be closed.
             settleBlocks();
-            onEvent({
-              event: 'error',
-              data: {
-                code: resumeAwareErrorCode(context.cliSessionId, errText),
-                message: errText,
-              },
-            });
+            // Unless somebody stopped this turn. A CLI on its way out of a
+            // SIGINT may write an error result as it goes, and reporting that
+            // would tell the server the turn failed when what happened is that
+            // it was cancelled. The finalizer makes the same distinction; it
+            // never gets the chance here, because this path settles the turn
+            // itself.
+            if (!signal.aborted) {
+              onEvent({
+                event: 'error',
+                data: {
+                  code: resumeAwareErrorCode(context.cliSessionId, errText),
+                  message: errText,
+                },
+              });
+            }
             // The SAME metadata as a successful turn. A turn that fails still
             // spent tokens and money — often more than one that succeeds — and
             // this reported `{}`, so the cost of exactly the turns worth

@@ -14,6 +14,7 @@ import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
 import { Bridge } from '../../src/bridge.js';
 import { ProviderAdapter, type AdapterStreamEvent, type ExecutionContext } from '../../src/providers/base.js';
 import type { ModelInfo } from '../../src/protocol/types.js';
+import { RequestRefusal } from '../../src/errors.js';
 
 /** Runs until it is aborted, and reports what happened to it. */
 class PatientAdapter extends ProviderAdapter {
@@ -31,6 +32,28 @@ class PatientAdapter extends ProviderAdapter {
       };
       if (context.signal.aborted) { finish(); return; }
       context.signal.addEventListener('abort', finish, { once: true });
+    });
+  }
+  listModels(): Promise<ModelInfo[]> {
+    return Promise.resolve([]);
+  }
+}
+
+/**
+ * Fails the way the work before the CLI fails when a turn is stopped during it:
+ * with a refusal, which carries its own terminal code.
+ */
+class FailsWhenStopped extends ProviderAdapter {
+  readonly providerName = 'fake';
+
+  execute(context: ExecutionContext): Promise<string | null> {
+    return new Promise((_resolve, reject) => {
+      const fail = (): void => reject(new RequestRefusal(
+        'attachment_failed',
+        'Attachment "invoice.pdf" could not be fetched: This operation was aborted',
+      ));
+      if (context.signal.aborted) { fail(); return; }
+      context.signal.addEventListener('abort', fail, { once: true });
     });
   }
   listModels(): Promise<ModelInfo[]> {
@@ -161,6 +184,37 @@ describe('cancel', () => {
     // cleanly exists to keep.
     const order = frames.map((f) => f['type'] === 'cancelled' ? 'cancelled' : `${String(f['type'])}:${String(f['event'] ?? '')}`);
     expect(order.indexOf('cancelled')).toBeGreaterThan(order.indexOf('stream:done'));
+  });
+
+  it('reports the cancel, not whatever the cancel broke', async () => {
+    // Work that runs BEFORE the CLI takes the same signal: aborting during an
+    // attachment download rejects the fetch, which arrives here as a refusal
+    // saying the attachment could not be fetched — a server may read that as
+    // transient and try again. On a resumed turn it is worse: any failure there
+    // is turned into `session_lost`, so the server would wipe the session and
+    // silently re-issue the turn somebody had just stopped.
+    const adapter = new FailsWhenStopped();
+    await startBridge(adapter as unknown as PatientAdapter);
+
+    socket.send(JSON.stringify({
+      type: 'ai_request',
+      request_id: 'req_refuse',
+      conversation_id: 'conv-1',
+      provider: 'fake',
+      // A resumed turn, which is the shape that would have been re-issued.
+      cli_session_id: 'sess-earlier',
+      message: 'take your time',
+      system_prompt: null,
+      options: {},
+    }));
+    await waitFor((f) => f['type'] === 'ai_request_ack', 'the request starting');
+
+    socket.send(JSON.stringify({ type: 'cancel', request_id: 'req_refuse' }));
+    await waitFor((f) => f['type'] === 'cancelled' && f['request_id'] === 'req_refuse', 'the cancelled reply');
+
+    const errors = frames.filter((f) => f['type'] === 'stream' && f['event'] === 'error');
+    expect(errors).toHaveLength(0);
+    expect(frames.filter((f) => f['type'] === 'stream' && f['event'] === 'done')).toHaveLength(1);
   });
 
   it('ignores an id that is not running, because that race is the ordinary case', async () => {

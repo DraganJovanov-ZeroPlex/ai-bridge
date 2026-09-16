@@ -1560,6 +1560,27 @@ export class Bridge extends EventEmitter<BridgeEvents> {
         const errMessage = err instanceof Error ? err.message : String(err);
         const wasResumeAttempt = cliSessionId !== null;
 
+        // Anything that fails BECAUSE the turn was cancelled is the cancel,
+        // and has to be reported as one. This has to come first, ahead of both
+        // branches below.
+        //
+        // The work before the CLI even starts takes the same signal: aborting
+        // during an attachment download rejects the fetch, which surfaces as a
+        // RequestRefusal saying the attachment "could not be fetched" — a
+        // server may reasonably treat that as transient and try again. Worse on
+        // a resumed turn, where the branch below turns ANY failure into
+        // `session_lost`: the server would wipe the session and silently
+        // re-issue the very turn somebody had just stopped.
+        if (controller.signal.aborted) {
+          log.info('Request failed after it was cancelled — reporting the cancel', {
+            requestId: request_id,
+            reason: errMessage,
+          });
+          this.sendStreamEvent(request_id, 'done', {});
+
+          return;
+        }
+
         // A refusal is terminal and carries its own code. It has to be handled
         // BEFORE the resume branch below: that branch turns any failure on a
         // resumed turn into `session_lost`, which tells the server to wipe the

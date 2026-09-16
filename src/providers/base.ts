@@ -135,6 +135,9 @@ export function createFinalizer(opts: {
 
   const tryFinalize = () => {
     if (!rlClosed || !childExited) return;
+    // Read BEFORE the listener goes, and kept: `aborted` stays true on the
+    // signal, but reading it here keeps the decision next to the rest.
+    const aborted = opts.signal.aborted;
     opts.signal.removeEventListener('abort', opts.onAbort);
 
     if (opts.getSettled()) {
@@ -162,6 +165,22 @@ export function createFinalizer(opts: {
           limit_seconds: timedOut.limitSeconds,
         },
       });
+      opts.onEvent({ event: 'done', data: {} });
+    } else if (aborted) {
+      // AHEAD OF `recoverTerminal` ON PURPOSE, and not only for tidiness. A
+      // cancel that lands when the only result so far belonged to the CLI's own
+      // queued work would otherwise fall through to the recovery below and
+      // report a `done` built from THAT — zero turns, zero cost — which is the
+      // "empty reply" this release exists to remove, arriving by a different
+      // road. Reordering these two silently brings it back.
+      //
+      // Somebody stopped this turn on purpose, so it is not a fault and must
+      // not read as one. The CLI is asked to stop with SIGINT and commonly
+      // exits non-zero when that lands mid-tool — measured against a real
+      // Claude: a turn cancelled three seconds in ended with
+      // "claude CLI exited with code 143" alongside the answer it had written.
+      // A person who pressed stop then sees an error they caused and cannot
+      // act on. What the turn produced has already been sent; this ends it.
       opts.onEvent({ event: 'done', data: {} });
     } else if (childExitCode !== 0 && childExitCode !== null) {
       opts.onEvent({

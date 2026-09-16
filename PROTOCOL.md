@@ -683,7 +683,9 @@ Stop a turn that is running, and leave a session that can be resumed.
 
 This is the other half of `ai_request` — a person pressing stop, or the server noticing an abort flag mid-turn. Without it the only thing that can end a turn is a bound, and every bridge-side bound is measured in minutes.
 
-The bridge does what it does when one of its own bounds fires: it ends the CLI's turn (SIGINT, escalating only if that is ignored), keeps everything the turn produced, closes any open block, and sends the turn's own `done`. A cancelled turn is not an error and is not reported as one.
+The bridge does what it does when one of its own bounds fires: it ends the CLI's turn (SIGINT, escalating only if that is ignored), keeps everything the turn produced, closes any open block, and sends the turn's own `done`.
+
+**A cancelled turn is not reported as an error**, in any of the three ways one could have leaked out: the CLI exiting non-zero because the signal landed mid-tool, the CLI writing an error `result` on its way out, and the cancel interrupting the work that runs *before* the CLI (an attachment download, say). The last one mattered most on a resumed turn, where a failure is what `session_lost` is read from — the server would have wiped the session and silently re-issued the turn somebody had just stopped.
 
 **An unknown `request_id` is ignored, not answered.** A cancel arriving just after the turn ended is the ordinary race — somebody pressed stop as the answer landed — and there is nothing left to report about it.
 
@@ -1397,7 +1399,9 @@ Each provider outputs differently. The bridge normalizes:
 
 The bridge maps all of these to the unified `block_start` / `block_delta` / `block_stop` event model defined in [Streaming Events](#streaming-events).
 
-**One invocation can run more than one turn, and only one of them is yours.** Claude Code answers work it queued for *itself* before it dequeues the message the bridge sent — a `<task-notification>` for a background shell command an earlier turn left running, say — and each of those turns ends with a `result` frame of its own. Those frames carry an `origin` (`{"kind":"task-notification"}`); the result that answers the bridge's prompt does not. The bridge ends the turn on the unstamped one, so a server sees exactly one `done`, reporting the turn it asked for.
+**One invocation can run more than one turn, and only one of them is yours.** Claude Code answers work it queued for *itself* before it dequeues the message the bridge sent — a `<task-notification>` for a background shell command an earlier turn left running, say — and each of those turns ends with a `result` frame of its own. Those frames carry an `origin` (`{"kind":"task-notification"}`); the result that answers the bridge's prompt does not. The bridge ends the turn on the unstamped one, so a server sees exactly one `done`, and it reports the turn the server asked for.
+
+The stamping is on the `result` frame, so that is what this covers. Content from a turn the CLI queued for itself would be forwarded like any other frame — today those turns make no API call and write nothing at all, which is why they are invisible apart from the `result` they end with.
 
 Treating the first `result` as terminal is what this replaces, and it was not a theoretical fault: the notification's result arrives within ~70ms with zero usage and no text, so the turn ended before the answer had started, the real reply was dropped frame by frame, and the person saw an empty message — then saw it again on the retry.
 
