@@ -117,6 +117,17 @@ export function createFinalizer(opts: {
   onBeforeFinalize?: () => void;
   /** Why the CLI was killed on purpose, if it was. */
   getTimeout?: () => { reason: string; limitSeconds: number } | null;
+  /**
+   * Last chance to end the turn properly when the CLI exited cleanly without
+   * one of our terminal events.
+   *
+   * Returns true if it emitted `done` itself, in which case nothing else is
+   * reported. An adapter that holds a terminal frame back — because it could
+   * not yet tell whether that frame ended OUR prompt or some queued work of
+   * the CLI's own — uses this to settle from the frame it kept rather than
+   * telling the server the turn produced nothing.
+   */
+  recoverTerminal?: () => boolean;
 }): { onRlClose: () => void; onChildClose: (code: number | null) => void } {
   let rlClosed = false;
   let childExitCode: number | null = null;
@@ -124,6 +135,9 @@ export function createFinalizer(opts: {
 
   const tryFinalize = () => {
     if (!rlClosed || !childExited) return;
+    // Read BEFORE the listener goes, and kept: `aborted` stays true on the
+    // signal, but reading it here keeps the decision next to the rest.
+    const aborted = opts.signal.aborted;
     opts.signal.removeEventListener('abort', opts.onAbort);
 
     if (opts.getSettled()) {
@@ -152,6 +166,22 @@ export function createFinalizer(opts: {
         },
       });
       opts.onEvent({ event: 'done', data: {} });
+    } else if (aborted) {
+      // AHEAD OF `recoverTerminal` ON PURPOSE, and not only for tidiness. A
+      // cancel that lands when the only result so far belonged to the CLI's own
+      // queued work would otherwise fall through to the recovery below and
+      // report a `done` built from THAT — zero turns, zero cost — which is the
+      // "empty reply" this release exists to remove, arriving by a different
+      // road. Reordering these two silently brings it back.
+      //
+      // Somebody stopped this turn on purpose, so it is not a fault and must
+      // not read as one. The CLI is asked to stop with SIGINT and commonly
+      // exits non-zero when that lands mid-tool — measured against a real
+      // Claude: a turn cancelled three seconds in ended with
+      // "claude CLI exited with code 143" alongside the answer it had written.
+      // A person who pressed stop then sees an error they caused and cannot
+      // act on. What the turn produced has already been sent; this ends it.
+      opts.onEvent({ event: 'done', data: {} });
     } else if (childExitCode !== 0 && childExitCode !== null) {
       opts.onEvent({
         event: 'error',
@@ -161,7 +191,7 @@ export function createFinalizer(opts: {
         },
       });
       opts.onEvent({ event: 'done', data: {} });
-    } else {
+    } else if (opts.recoverTerminal?.() !== true) {
       // Clean exit but no terminal event — emit a non-fatal error.
       opts.onEvent({
         event: 'error',

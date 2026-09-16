@@ -372,7 +372,8 @@ export type BridgeToServerMessage =
   | PostureMessage
   | LocalResultMessage
   | StreamChunkMessage
-  | StreamEndMessage;
+  | StreamEndMessage
+  | CancelledMessage;
 
 // ---------------------------------------------------------------------------
 // Server -> Bridge Messages
@@ -509,6 +510,41 @@ export interface StreamEndMessage {
 export interface StreamCancelMessage {
   type: 'stream_cancel';
   id: string;
+}
+
+/**
+ * Stop a turn that is running, and leave a session that can be resumed.
+ *
+ * The other half of `ai_request`. The server has been sending this since long
+ * before the bridge handled it: a person pressing stop, or an abort flag
+ * observed mid-turn, put `{"type":"cancel"}` on the wire and the bridge logged
+ * "unknown message type" and kept going. The turn ran to its end on somebody's
+ * machine, and the server sat waiting for a `cancelled` that was never coming.
+ *
+ * What the bridge does with it is what it does when one of its own bounds
+ * fires: end the CLI's turn cleanly, keep what the turn produced, and report
+ * the end of it. A cancelled turn is not an error and is not a failure of the
+ * machine; it is a turn that stopped when it was asked to.
+ *
+ * Unknown ids are ignored rather than answered. A cancel that arrives after the
+ * turn ended is the normal race -- somebody pressed stop as the answer landed
+ * -- and there is nothing to report about it.
+ */
+export interface CancelMessage {
+  type: 'cancel';
+  request_id: string;
+}
+
+/**
+ * The turn the server asked to stop has stopped.
+ *
+ * Sent once the CLI has actually gone and the turn's own events have been
+ * flushed, not on receipt of the cancel -- so whatever the model managed to
+ * write before it was interrupted reaches the server ahead of the terminal.
+ */
+export interface CancelledMessage {
+  type: 'cancelled';
+  request_id: string;
 }
 
 /** A single prior turn in a conversation's history. */
@@ -662,7 +698,8 @@ export type ServerToBridgeMessage =
   | TokenRefreshMessage
   | LocalCallMessage
   | AttachmentReadMessage
-  | StreamCancelMessage;
+  | StreamCancelMessage
+  | CancelMessage;
 
 // ---------------------------------------------------------------------------
 // Stream Event Types and Data

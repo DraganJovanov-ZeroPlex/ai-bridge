@@ -58,6 +58,7 @@ import { RequestRefusal } from '../errors.js';
 import { resumeAwareErrorCode } from './session-error.js';
 import { boundArguments, safeStringify, toolResultEventData } from './result-text.js';
 import { createLogger, isDebugEnabled } from '../utils/logger.js';
+import { stopTurn, stoppedByUs } from './stop.js';
 
 /**
  * Known Gemini CLI model aliases and models.
@@ -240,7 +241,7 @@ export class GeminiAdapter extends ProviderAdapter {
             reason,
             limitSeconds,
           });
-          child.kill('SIGTERM');
+          stopTurn(child, { requestId, provider: 'gemini' });
         },
       });
       const timeoutTimer = { cancel: () => timeouts?.cancel() };
@@ -249,7 +250,7 @@ export class GeminiAdapter extends ProviderAdapter {
       const onAbort = () => {
         clearRequestTimeout(timeoutTimer);
         log.info('Request aborted — killing gemini process', { requestId });
-        child.kill('SIGTERM');
+        stopTurn(child, { requestId, provider: 'gemini' });
       };
       signal.addEventListener('abort', onAbort, { once: true });
 
@@ -455,6 +456,10 @@ export class GeminiAdapter extends ProviderAdapter {
           // severity='error' and severity='warning' are both forwarded to the
           // server as stream events.
           if (severity === 'error') {
+            // Not ours to report if we are the ones who stopped this turn: the
+            // finalizer says why, with the limit when a bound fired.
+            if (stoppedByUs(signal, timeouts)) return;
+
             const errText = message ?? 'Unknown Gemini error';
             onEvent({
               event: 'error',

@@ -18,10 +18,19 @@ import { GeminiAdapter } from '../../src/providers/gemini.js';
 import type { AdapterStreamEvent } from '../../src/providers/base.js';
 
 /** Replay gemini NDJSON through the real adapter. */
-async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpenMs?: number; dripMs?: number } = {}): Promise<AdapterStreamEvent[]> {
+async function replay(
+  lines: unknown[],
+  opts: {
+    silenceSeconds?: number; holdOpenMs?: number; dripMs?: number;
+    /** What the CLI writes on its way out, once it is asked to stop. */
+    lateLines?: unknown[];
+  } = {},
+): Promise<AdapterStreamEvent[]> {
   const dir = mkdtempSync(join(tmpdir(), 'gemini-'));
   const path = join(dir, 'stream.ndjson');
   writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const latePath = join(dir, 'late.ndjson');
+  writeFileSync(latePath, (opts.lateLines ?? []).map((l) => JSON.stringify(l)).join('\n') + '\n');
 
   class Replay extends GeminiAdapter {
     protected override spawnCli(): ChildProcessByStdio<Writable | null, Readable, Readable> {
@@ -32,6 +41,11 @@ async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpe
           'const fs = require("fs");'
           + 'const lines = fs.readFileSync(process.argv[1], "utf8").split("\\n").filter(Boolean);'
           + 'const hold = Number(process.argv[2] || 0), drip = Number(process.argv[3] || 0);'
+          // SIGINT asks a CLI to wind down, and a CLI winding down often writes
+          // one last frame. That frame is what these tests are about.
+          + 'const late = fs.readFileSync(process.argv[4], "utf8").trim();'
+          + 'process.on("SIGINT", () => { if (late) process.stdout.write(late + "\\n");'
+          + '  setTimeout(() => process.exit(130), 50); });'
           + 'let i = 0; const tick = () => {'
           + '  if (i < lines.length) { process.stdout.write(lines[i++] + "\\n"); if (drip > 0) setTimeout(tick, drip); else tick(); }'
           + '  else if (hold > 0) setTimeout(() => {}, hold);'
@@ -39,6 +53,7 @@ async function replay(lines: unknown[], opts: { silenceSeconds?: number; holdOpe
           path,
           String(opts.holdOpenMs ?? 0),
           String(opts.dripMs ?? 0),
+          latePath,
         ],
         { stdio: ['ignore', 'pipe', 'pipe'] },
       ) as ChildProcessByStdio<Writable | null, Readable, Readable>;
@@ -146,6 +161,27 @@ describe('what Gemini reported about the turn', () => {
 });
 
 describe('the silence bound reaches the sibling adapters too', () => {
+  it('does not report the error gemini writes on its way out', async () => {
+    // Stopping a CLI with SIGINT rather than SIGTERM is what makes this
+    // reachable: a CLI asked to wind down gets to write a last frame, and
+    // reporting it says the turn failed when the bridge stopped it.
+    const events = await replay(
+      [{ type: 'init', session_id: 's1', model: 'gemini-2.5-pro' }],
+      {
+        silenceSeconds: 0.2,
+        holdOpenMs: 5000,
+        lateLines: [{ type: 'error', severity: 'error', message: 'Aborted' }],
+      },
+    );
+
+    const errors = of(events, 'error').map((e) => e.data as Record<string, unknown>);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!['code']).toBe('silence_timeout_exceeded');
+    expect(errors[0]!['limit_seconds']).toBe(0.2);
+    expect(of(events, 'done')).toHaveLength(1);
+  });
+
   it('stops a gemini turn that has gone quiet, and says which bound it was', async () => {
     // The shared helper is wired into all three adapters by the same shape of
     // edit. Without a test on at least one sibling, that wiring could be

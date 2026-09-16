@@ -30,6 +30,7 @@ import { buildCodexMcpArgs, CODEX_BEARER_ENV_VAR } from '../mcp/cli-config.js';
 import { resumeAwareErrorCode } from './session-error.js';
 import { boundArgumentText, boundArguments, safeStringify, toolResultEventData } from './result-text.js';
 import { createLogger, isDebugEnabled } from '../utils/logger.js';
+import { stopTurn, stoppedByUs } from './stop.js';
 
 const log = createLogger('CodexAdapter');
 
@@ -303,7 +304,7 @@ export class CodexAdapter extends ProviderAdapter {
             reason,
             limitSeconds,
           });
-          child.kill('SIGTERM');
+          stopTurn(child, { requestId, provider: 'codex' });
         },
       });
       const timeoutTimer = { cancel: () => timeouts?.cancel() };
@@ -312,7 +313,7 @@ export class CodexAdapter extends ProviderAdapter {
       const onAbort = () => {
         clearRequestTimeout(timeoutTimer);
         log.info('Request aborted — killing codex process', { requestId });
-        child.kill('SIGTERM');
+        stopTurn(child, { requestId, provider: 'codex' });
       };
       signal.addEventListener('abort', onAbort, { once: true });
 
@@ -419,6 +420,10 @@ export class CodexAdapter extends ProviderAdapter {
 
             blockIndex++;
           } else if (itemType === 'error') {
+            // Not ours to report if we are the ones who stopped this turn: the
+            // finalizer says why, with the limit when a bound fired.
+            if (stoppedByUs(signal, timeouts)) return;
+
             // Error item
             const message = (item['message'] as string) ?? 'Unknown Codex error';
             log.warn('Codex error item', { message: message.substring(0, 200) });
@@ -572,6 +577,9 @@ export class CodexAdapter extends ProviderAdapter {
 
         // ── turn.failed ────────────────────────────────────
         if (type === 'turn.failed') {
+          // See the error item above.
+          if (stoppedByUs(signal, timeouts)) return;
+
           const error = parsed['error'] as Record<string, unknown> | undefined;
           const message = (error?.['message'] as string) ?? 'Codex turn failed';
           log.warn('Codex turn failed', { message: message.substring(0, 200) });
@@ -588,6 +596,9 @@ export class CodexAdapter extends ProviderAdapter {
 
         // ── error (top-level) ──────────────────────────────
         if (type === 'error') {
+          // See the error item above.
+          if (stoppedByUs(signal, timeouts)) return;
+
           const message = (parsed['message'] as string) ?? 'Unknown Codex error';
           log.warn('Codex error event', { message: message.substring(0, 200) });
 
