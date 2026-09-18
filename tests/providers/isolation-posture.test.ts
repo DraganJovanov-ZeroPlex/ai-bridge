@@ -94,6 +94,8 @@ async function launch(
     silenceTimeoutSeconds: 0,
     cliSessionId: null,
     attachmentDir,
+    bridgeEnv: {},
+    bridgeAddendum: null,
   };
 
   await new Probe().execute(context, (_e: AdapterStreamEvent) => undefined);

@@ -79,7 +79,7 @@ export function getBridgeWorkingDir(): string {
  */
 export function buildSpawnEnv(
   requestId?: string,
-  extra?: Record<string, string>,
+  extra?: Record<string, string | null>,
 ): NodeJS.ProcessEnv {
   const env = { ...process.env };
   if (requestId) {
@@ -87,7 +87,15 @@ export function buildSpawnEnv(
   }
   if (extra) {
     for (const [key, value] of Object.entries(extra)) {
-      env[key] = value;
+      // `null` is how a caller says "this key must not be set", which is not
+      // the same as never mentioning it: the bridge applies defaults, so a
+      // project turning one back off has to be able to REMOVE an inherited
+      // value rather than only overwrite it. Assigning undefined would leave
+      // the key present-but-undefined, which spawn() forwards as an empty
+      // string — and an empty string is a set value to every CLI that reads
+      // it. Delete is the only spelling that actually unsets.
+      if (value === null) delete env[key];
+      else env[key] = value;
     }
   }
   // Remove credential variables from the child process environment so they do
@@ -168,6 +176,324 @@ export function resolveSystemPrompt(
  */
 export function buildCombinedPrompt(systemPrompt: string, userMessage: string): string {
   return `${systemPrompt}\n\nUser request:\n${userMessage}`;
+}
+
+/**
+ * Join the server's system prompt and the bridge's addendum into one string,
+ * for CLIs that have no flag to carry them separately.
+ *
+ * Claude keeps them apart (`--system-prompt` plus `--append-system-prompt`);
+ * Codex and Gemini have only the one prompt, so the two owners' text has to be
+ * concatenated the way buildCombinedPrompt() already concatenates instructions
+ * for those adapters.
+ *
+ * Returns null only when there is nothing to say at all, so a caller can still
+ * tell "no prompt" from "an empty one".
+ */
+export function joinSystemPrompt(
+  systemPrompt: string | null,
+  addendum: string | null,
+): string | null {
+  if (systemPrompt === null) return addendum;
+  if (addendum === null) return systemPrompt;
+  return `${systemPrompt}\n\n${addendum}`;
+}
+
+/**
+ * Environment keys a server may set or unset on the spawned CLI, and the
+ * defaults the bridge applies when it says nothing.
+ *
+ * Known keys and their defaults are ONE list on purpose, so the allow-list and
+ * the defaults cannot drift apart. A key may be settable without being
+ * defaulted, which is how an opinion stays available without being imposed.
+ *
+ * Restricting the keys is a security boundary rather than tidiness. An open map
+ * would let a server point the CLI at another endpoint, or rewrite its search
+ * path, inside a process that holds the operator's credentials. The bridge
+ * already reasons this way in stripCredentials() and in the local-tool
+ * allow-list.
+ */
+export const BRIDGE_ENV_KEYS: Record<string, { default?: string }> = {
+  /**
+   * Background shell work is off because it cannot work here, not because
+   * anyone prefers it off. Every bridge consumer gets one process per turn —
+   * that is how the bridge spawns — so a shell that outlives the turn is never
+   * collected: its output reaches nobody and the next turn opens with a notice
+   * that the work was orphaned.
+   *
+   * It is a good default because of the SPAWN MODEL, not forever. If the bridge
+   * ever gains a persistent-process mode this must be recomputed rather than
+   * inherited, or it will be disabling something that works again.
+   */
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: { default: '1' },
+
+  /**
+   * Settable, deliberately NOT defaulted.
+   *
+   * The argument for defaulting it on is real — one machine user serves many
+   * projects, so notes written from one client's chat can surface in another's.
+   * But that is a preference about privacy, not a capability that is broken by
+   * the spawn model, and the handover that specified this work made shipping
+   * the default conditional on first establishing what auto-memory actually
+   * writes and where.
+   *
+   * What was verified on Claude Code 2.1.267: the variable is read
+   * (`process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY`), and the CLI distinguishes
+   * `disabled_by_env_var` from `disabled_by_setting` (`autoMemoryEnabled`), so
+   * setting it does take effect. What was NOT established is the write path —
+   * the memory directory is configurable (CLAUDE_CODE_REMOTE_MEMORY_DIR,
+   * CLAUDE_COWORK_MEMORY_PATH_OVERRIDE) and no memory directory existed to
+   * inspect on the machine this was built on.
+   *
+   * So it stays settable and unset: a server that wants it can ask, and the
+   * bridge does not silently remove a feature on a single-project operator's
+   * machine on the strength of an untested assumption. Revisit with the write
+   * path established.
+   */
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY: {},
+
+  /**
+   * Settable, deliberately NOT defaulted. The bridge has no architectural
+   * reason for it — it changes cost and behaviour for every project that never
+   * asked, and shipping one person's choice bridge-wide is how defaults become
+   * invisible policy nobody remembers deciding.
+   */
+  CLAUDE_CODE_FORK_SUBAGENT: {},
+};
+
+/** What resolveBridgeEnv() decided, including what it refused. */
+export interface ResolvedBridgeEnv {
+  /** Merge straight into buildSpawnEnv()'s `extra`. `null` means unset. */
+  values: Record<string, string | null>;
+  /** Allow-listed keys the server actually overrode, for the ack echo. */
+  overridden: string[];
+  /** Keys the server sent that are not allow-listed. Dropped, and reported. */
+  rejected: string[];
+}
+
+/**
+ * Resolve the environment a CLI is spawned with for one turn: bridge defaults,
+ * with a server's allow-listed overrides applied over them.
+ *
+ * An override of `null` or the empty string means "unset", which is why the
+ * protocol requires it to be written explicitly: "not mentioned" and
+ * "deliberately off" must never look alike.
+ *
+ * Note what this does NOT do: refuse the turn over an unknown key. A key the
+ * bridge does not know is dropped and named in the acknowledgement, because a
+ * server on a newer protocol than the bridge is an ordinary version skew, and
+ * failing the turn would make every bridge upgrade a flag day.
+ */
+export function resolveBridgeEnv(
+  overrides?: Record<string, string | null> | null,
+): ResolvedBridgeEnv {
+  const values: Record<string, string | null> = {};
+  for (const [key, spec] of Object.entries(BRIDGE_ENV_KEYS)) {
+    if (spec.default !== undefined) values[key] = spec.default;
+  }
+
+  const overridden: string[] = [];
+  const rejected: string[] = [];
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    if (!(key in BRIDGE_ENV_KEYS)) {
+      rejected.push(key);
+      continue;
+    }
+    values[key] = value === null || value === '' ? null : value;
+    overridden.push(key);
+  }
+
+  return { values, overridden, rejected };
+}
+
+/** Does the resolved environment leave background shell work available? */
+function backgroundTasksEnabled(values: Record<string, string | null>): boolean {
+  const raw = values['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'];
+  if (raw === null || raw === undefined || raw === '') return true;
+  return raw === '0' || raw.toLowerCase() === 'false';
+}
+
+/** Longest server-supplied addendum the bridge will carry. */
+export const MAX_BRIDGE_PROMPT_BYTES = 8 * 1024;
+
+/** Stream-event error code for a `bridge_prompt` the bridge will not act on. */
+export const BRIDGE_PROMPT_INVALID = 'bridge_prompt_invalid';
+
+/** How a server steers the bridge's own prompt addendum. */
+export type BridgePromptMode = 'default' | 'off' | 'append' | 'replace';
+
+/** The `bridge_prompt` field of an ai_request. */
+export interface BridgePromptSpec {
+  mode?: BridgePromptMode;
+  text?: string | null;
+}
+
+/**
+ * The bridge's own addendum to the system prompt.
+ *
+ * It exists because the bridge is the only component that knows a turn is a
+ * process. The server owns the voice and the product rules; this owns the
+ * lifecycle, and nothing else.
+ *
+ * Product-neutral and HOST-neutral on purpose: the bridge runs on machines that
+ * may have neither Docker nor systemd, so concrete commands belong in the
+ * machine's own instruction file where they are actually true.
+ *
+ * GENERATED from the resolved environment rather than shipped as a fixed
+ * string. If a project turns background work back on, an addendum still saying
+ * it is disabled would be lying to the model about a capability it can observe
+ * directly — and being contradicted by your own instructions is worse than
+ * having none.
+ */
+export function buildBridgeAddendum(values: Record<string, string | null>): string {
+  const lines: string[] = [
+    "## How this session runs",
+    "",
+    "You are a non-interactive agent. Each message you receive is answered by a",
+    "separate CLI process that exits the moment your turn ends. Nothing you started",
+    "survives between turns except the conversation itself.",
+    "",
+  ];
+
+  if (backgroundTasksEnabled(values)) {
+    lines.push(
+      "- **Background shell commands are available here, but they still die with",
+      "  this turn.** Nothing on the far side collects a process that outlives the",
+      "  turn that started it, so use one only for work you will also finish reading",
+      "  before you answer.",
+    );
+  } else {
+    lines.push(
+      "- **Background shell commands are disabled.** The Bash tool has no",
+      "  `run_in_background` parameter here, deliberately. A shell that outlives the",
+      "  turn that started it is never collected: its output reaches nobody, and the",
+      "  next turn learns only that it was orphaned.",
+      "- **Do not work around that with `&`, `nohup`, `disown` or `setsid`.** They",
+      "  still work at the shell level, and they are worse than what they replace:",
+      "  the process is re-parented to init, nothing reaps it, and nobody is told it",
+      "  exists.",
+    );
+  }
+
+  lines.push(
+    "- **Anything that must outlive the turn has to run as a service managed",
+    "  outside this session**, started so that it does not depend on your process.",
+    "  How to do that is specific to this machine: follow its own instructions, and",
+    "  ask rather than improvise one.",
+    "- **Every command is bounded by its timeout** (2 minutes by default, 10 at",
+    "  most). A command that sits waiting for input burns that whole budget and then",
+    "  fails, so use the non-interactive form of every tool: `-y`, `--force`,",
+    "  `--no-input`.",
+    "- **Subagents are the exception, and they are safe.** The process stays alive",
+    "  until a subagent you spawned has finished, so delegating long work to one is",
+    "  fine and is often the right move. Never end your turn claiming a result a",
+    "  subagent has not reported yet.",
+    "",
+    "## Parallel tool calls",
+    "",
+  );
+
+  if (backgroundTasksEnabled(values)) {
+    lines.push(
+      "Issuing independent calls together is your main throughput lever. Before",
+      "sending a single tool call, ask whether the next two or three depend on its",
+      "result. If they do not, send them in the same block. Three 60-second commands",
+      "sent together cost 60 seconds; sent one at a time they cost three minutes of",
+      "someone's day.",
+    );
+  } else {
+    lines.push(
+      "With backgrounding gone, issuing independent calls together is the whole of",
+      "your throughput, and it matters more here than general advice suggests.",
+      "Before sending a single tool call, ask whether the next two or three depend",
+      "on its result. If they do not, send them in the same block. Three 60-second",
+      "commands sent together cost 60 seconds; sent one at a time they cost three",
+      "minutes of someone's day.",
+    );
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Check a server's `bridge_prompt` before anything acts on it.
+ *
+ * Rejected at the protocol boundary rather than guessed at: a server sending a
+ * contradictory instruction is a bug in the server, and a chat whose
+ * instructions are not what either side believes is worse than a refused turn.
+ *
+ * @returns An error message, or null when the spec is well-formed.
+ */
+export function validateBridgePrompt(spec?: BridgePromptSpec | null): string | null {
+  if (spec === undefined || spec === null) return null;
+
+  const mode = spec.mode ?? 'default';
+  if (!['default', 'off', 'append', 'replace'].includes(mode)) {
+    return `bridge_prompt.mode must be one of default, off, append, replace (got ${JSON.stringify(mode)}).`;
+  }
+
+  const text = spec.text ?? null;
+  const hasText = text !== null && text !== '';
+
+  // Text where none is used would be silently discarded, and a mode that says
+  // it is adding something must add something — `append` with nothing is a
+  // no-op that reads as applied, and `replace` with nothing silently means
+  // `off`. All four are the server believing something that is not happening.
+  if ((mode === 'default' || mode === 'off') && hasText) {
+    return `bridge_prompt.text is not allowed with mode "${mode}" — it would be discarded.`;
+  }
+  if ((mode === 'append' || mode === 'replace') && !hasText) {
+    return `bridge_prompt.text is required with mode "${mode}".`;
+  }
+
+  // The bridge already feeds Claude its prompt over stdin because a large
+  // positional argument dies with spawn E2BIG. A cap with a clear refusal beats
+  // an E2BIG at spawn time, which surfaces as a turn that failed for no
+  // visible reason.
+  if (hasText && Buffer.byteLength(text, 'utf8') > MAX_BRIDGE_PROMPT_BYTES) {
+    return `bridge_prompt.text exceeds ${MAX_BRIDGE_PROMPT_BYTES} bytes.`;
+  }
+
+  return null;
+}
+
+/** What resolveBridgeAddendum() decided, for the spawn and for the ack echo. */
+export interface ResolvedBridgePrompt {
+  /** Text to append to the system prompt, or null to append nothing. */
+  text: string | null;
+  /** The mode actually applied. */
+  mode: BridgePromptMode;
+  /** Whether the server supplied text of its own. */
+  serverText: boolean;
+}
+
+/**
+ * Resolve the addendum for this turn from the server's request and the
+ * environment the turn will actually run with.
+ *
+ * `off` and `replace` are the project's right, but both drop a true statement
+ * about the runtime from the assistant's instructions — so both say so in the
+ * log, because a project taking them on owns explaining the lifecycle itself.
+ */
+export function resolveBridgeAddendum(
+  spec: BridgePromptSpec | null | undefined,
+  values: Record<string, string | null>,
+): ResolvedBridgePrompt {
+  const mode = spec?.mode ?? 'default';
+  const serverTextRaw = spec?.text ?? null;
+  const serverText = serverTextRaw !== null && serverTextRaw !== '';
+  const addendum = buildBridgeAddendum(values);
+
+  switch (mode) {
+    case 'off':
+      return { text: null, mode, serverText };
+    case 'replace':
+      return { text: serverTextRaw, mode, serverText };
+    case 'append':
+      return { text: `${addendum}\n\n${serverTextRaw}`, mode, serverText };
+    default:
+      return { text: addendum, mode: 'default', serverText };
+  }
 }
 
 /**

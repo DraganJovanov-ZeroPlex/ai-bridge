@@ -101,6 +101,8 @@ async function run(opts: {
       silenceTimeoutSeconds: opts.silenceTimeoutSeconds ?? 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => events.push(e));
   } finally {
     rmSync(scratch, { recursive: true, force: true });

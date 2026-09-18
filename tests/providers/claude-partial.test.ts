@@ -485,6 +485,8 @@ async function replay(fixture: string): Promise<AdapterStreamEvent[]> {
     silenceTimeoutSeconds: 0,
     cliSessionId: null,
     attachmentDir: null,
+    bridgeEnv: {},
+    bridgeAddendum: null,
   };
 
   const events: AdapterStreamEvent[] = [];
@@ -653,6 +655,8 @@ describe('the --include-partial-messages flag', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, () => {});
 
     return recorded;
@@ -715,6 +719,8 @@ describe('a turn that is cut off mid-stream', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => events.push(e));
     return events;
   }
@@ -799,6 +805,8 @@ describe('a turn that is cut off mid-stream', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => events.push(e));
 
     expect(events.some((e) => e.event === 'error')).toBe(true);
@@ -844,6 +852,8 @@ describe('a request cancelled before the CLI is spawned', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => events.push(e));
 
     expect(spawned).toBe(false);
@@ -897,6 +907,8 @@ describe('a whole-message frame arriving while a partial block is open', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => events.push(e));
 
     // No block_start may appear between another block's start and its stop.
@@ -943,6 +955,8 @@ describe('frames arriving after the turn has ended', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => events.push(e));
     return events;
   }

@@ -226,6 +226,27 @@ export interface AiRequestAckMessage {
   type: 'ai_request_ack';
   request_id: string;
   cli_session_id: string | null;
+  /**
+   * What the bridge resolved for this turn's session defaults.
+   *
+   * Echoed so a server can ASSERT it got what it asked for, instead of
+   * inferring it from the assistant's behaviour three turns later. Same
+   * instinct as the `origin` stamping elsewhere in this protocol: make it
+   * observable rather than deducible.
+   *
+   * Omitted entirely by a bridge that predates this field, so a server must
+   * treat absence as "unknown", never as "defaults applied".
+   */
+  bridge_session?: {
+    /** The prompt mode actually applied. */
+    prompt_mode: 'default' | 'off' | 'append' | 'replace';
+    /** Whether the server supplied addendum text of its own. */
+    prompt_server_text: boolean;
+    /** Allow-listed env keys this request overrode. */
+    env_overridden: string[];
+    /** Keys the request named that the bridge does not allow, and dropped. */
+    env_rejected: string[];
+  };
 }
 
 /**
@@ -603,6 +624,35 @@ export interface AiRequestMessage {
    * Deleted when the turn terminates.
    */
   attachments?: AttachmentRef[];
+  /**
+   * Environment keys to set or unset on the spawned CLI for this turn.
+   *
+   * Only keys the bridge allow-lists are honoured (see BRIDGE_ENV_KEYS in
+   * src/providers/env.ts); anything else is dropped and named in the ack, so a
+   * server on a newer protocol than the bridge degrades rather than fails. A
+   * value of `null` or `""` unsets the key, which is how a project removes a
+   * bridge default rather than only overwriting it.
+   *
+   * Absent means the bridge's own defaults, which is the common case and the
+   * point of putting the behaviour here rather than in every consuming server.
+   */
+  bridge_env?: Record<string, string | null>;
+  /**
+   * How the server wants the bridge's own prompt addendum handled.
+   *
+   * The addendum carries the session LIFECYCLE — one process per turn, what
+   * that means for background work — which the bridge is the only component in
+   * a position to know. The server keeps ownership of the voice and the product
+   * rules through `system_prompt`; this is beside it, not instead of it.
+   *
+   * Absent means `default`. See BridgePromptSpec in src/providers/env.ts for
+   * the modes and the validation, which is strict: a contradictory spec is
+   * refused with `bridge_prompt_invalid` rather than guessed at.
+   */
+  bridge_prompt?: {
+    mode?: 'default' | 'off' | 'append' | 'replace';
+    text?: string | null;
+  };
 }
 
 /**

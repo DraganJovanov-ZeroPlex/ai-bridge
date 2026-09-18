@@ -73,6 +73,8 @@ async function replay(
       silenceTimeoutSeconds: opts.silenceSeconds ?? 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => events.push(e));
   } finally {
     rmSync(dir, { recursive: true, force: true });
