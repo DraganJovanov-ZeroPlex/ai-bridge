@@ -33,16 +33,27 @@ describe('resolveBridgeEnv()', () => {
     expect(resolveBridgeEnv().values[BACKGROUND]).toBe('1');
   });
 
-  it('leaves the non-architectural keys unset, so nothing is removed unasked', () => {
+  it('disables auto-memory by default, so notes do not cross between projects', () => {
+    expect(resolveBridgeEnv().values['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
+  });
+
+  it('leaves fork-subagent unset, so nothing is changed unasked', () => {
     const { values } = resolveBridgeEnv();
 
-    // Present in the allow-list (a server MAY set them) but carrying no
+    // Present in the allow-list (a server MAY set it) but carrying no
     // default — the distinction that keeps an opinion available without
-    // imposing it.
-    expect(BRIDGE_ENV_KEYS['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBeDefined();
+    // imposing it. The bridge has no architectural or privacy reason for this
+    // one, and it changes cost for every project that never asked.
     expect(BRIDGE_ENV_KEYS['CLAUDE_CODE_FORK_SUBAGENT']).toBeDefined();
-    expect(values['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBeUndefined();
     expect(values['CLAUDE_CODE_FORK_SUBAGENT']).toBeUndefined();
+  });
+
+  it('lets a project turn memory back on for itself', () => {
+    expect(
+      resolveBridgeEnv({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: null }).values[
+        'CLAUDE_CODE_DISABLE_AUTO_MEMORY'
+      ],
+    ).toBeNull();
   });
 
   it('lets a project override an allow-listed key', () => {
