@@ -228,29 +228,26 @@ export const BRIDGE_ENV_KEYS: Record<string, { default?: string }> = {
   CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: { default: '1' },
 
   /**
-   * Settable, deliberately NOT defaulted.
+   * Off by default, because one machine user serves many projects: notes
+   * written from one client's chat can surface in another's, and on a shared
+   * or multi-tenant box that is a leak between clients rather than a lost
+   * convenience. An operator who wants memory back has `bridge_env` to say so.
    *
-   * The argument for defaulting it on is real — one machine user serves many
-   * projects, so notes written from one client's chat can surface in another's.
-   * But that is a preference about privacy, not a capability that is broken by
-   * the spawn model, and the handover that specified this work made shipping
-   * the default conditional on first establishing what auto-memory actually
-   * writes and where.
+   * Unlike background tasks above, this is a PRIVACY default rather than an
+   * architectural one — the feature is not broken by the spawn model, it is
+   * simply not something a bridge should leave on across tenants by default.
    *
-   * What was verified on Claude Code 2.1.267: the variable is read
+   * What is verified on Claude Code 2.1.267: the variable is read
    * (`process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY`), and the CLI distinguishes
    * `disabled_by_env_var` from `disabled_by_setting` (`autoMemoryEnabled`), so
-   * setting it does take effect. What was NOT established is the write path —
-   * the memory directory is configurable (CLAUDE_CODE_REMOTE_MEMORY_DIR,
-   * CLAUDE_COWORK_MEMORY_PATH_OVERRIDE) and no memory directory existed to
-   * inspect on the machine this was built on.
-   *
-   * So it stays settable and unset: a server that wants it can ask, and the
-   * bridge does not silently remove a feature on a single-project operator's
-   * machine on the strength of an untested assumption. Revisit with the write
-   * path established.
+   * setting it does take effect. What is still NOT established is the write
+   * path — the memory directory is configurable
+   * (CLAUDE_CODE_REMOTE_MEMORY_DIR, CLAUDE_COWORK_MEMORY_PATH_OVERRIDE) and
+   * none existed to inspect on the machine this was built on. That gap bounds
+   * what can be claimed about WHERE notes would otherwise land; it does not
+   * change the decision to keep them off.
    */
-  CLAUDE_CODE_DISABLE_AUTO_MEMORY: {},
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY: { default: '1' },
 
   /**
    * Settable, deliberately NOT defaulted. The bridge has no architectural

@@ -676,7 +676,7 @@ That is not a product decision any one server should have to rediscover. The bri
 | Key | Default | Why |
 |---|---|---|
 | `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` | `"1"` | Architectural. The capability cannot work under one-process-per-turn, so it is off for every consumer equally. Recompute this if the bridge ever gains a persistent-process mode — it would then be disabling something that works again. |
-| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | *(none)* | Settable, not defaulted. Defaulting it on is defensible for a multi-project machine, but it removes a feature a single-project operator may want, and what auto-memory writes and where is not yet established. |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | `"1"` | Privacy. One machine user serves many projects, so notes written from one client's chat can surface in another's — a leak between tenants rather than a lost convenience. An operator who wants memory back says so with `bridge_env`. |
 | `CLAUDE_CODE_FORK_SUBAGENT` | *(none)* | Settable, not defaulted. The bridge has no architectural reason for it, and it changes cost and behaviour for every project that never asked. |
 
 `null` or `""` **unsets** a key — which is how a project removes a bridge default rather than only overwriting it. "Not mentioned" and "deliberately off" must never look alike, so the unset is written explicitly.
