@@ -656,19 +656,79 @@ So the bridge fetches each one instead:
 6. A short preamble naming the absolute paths, types and sizes is prepended to `message`, so the model knows the files exist and where they are. In `isolated`, where Claude's tool surface is otherwise restricted to `mcp__bridge__*`, a turn carrying attachments also gets a read rule **scoped to that turn's attachment directory** (`Read(/<dir>/**)`). Without it the preamble would name paths the model is not permitted to open, and the turn would end with it saying it cannot see a file the user had just attached. A bare `Read` would instead grant the whole filesystem — a server controls both the attachments and the message, so that would be arbitrary file read switched on by sending a field.
 7. The request's attachment directory is deleted when the turn terminates — on `done`, `error` and `cancelled` alike. `--keep-attachments` retains it for debugging.
 
+#### Additive fields: `bridge_env` and `bridge_prompt`
+
+Session defaults the bridge owns, and the two levers a server has over them. **Both are optional, and a server that sends neither gets the behaviour described here** — which is the point of putting it in the bridge rather than in every consuming server.
+
+##### Why the bridge owns this at all
+
+Every turn is answered by a **separate CLI process that exits the moment that turn ends**. Nothing the assistant started survives it. So when the model reaches for a background shell command, the result is never collected: the process tracking it is gone, its output reaches nobody, and the next turn opens with a notice that the work was orphaned. To the reader it looks as though the assistant forgot what it was doing.
+
+That is not a product decision any one server should have to rediscover. The bridge is the only component that knows a turn is a process, so the bridge states it.
+
+```json
+"bridge_env": { "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0" },
+"bridge_prompt": { "mode": "append", "text": "Answer in Dutch." }
+```
+
+**`bridge_env`** — environment keys to set or unset on the spawned CLI. Only allow-listed keys are honoured:
+
+| Key | Default | Why |
+|---|---|---|
+| `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` | `"1"` | Architectural. The capability cannot work under one-process-per-turn, so it is off for every consumer equally. Recompute this if the bridge ever gains a persistent-process mode — it would then be disabling something that works again. |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | *(none)* | Settable, not defaulted. Defaulting it on is defensible for a multi-project machine, but it removes a feature a single-project operator may want, and what auto-memory writes and where is not yet established. |
+| `CLAUDE_CODE_FORK_SUBAGENT` | *(none)* | Settable, not defaulted. The bridge has no architectural reason for it, and it changes cost and behaviour for every project that never asked. |
+
+`null` or `""` **unsets** a key — which is how a project removes a bridge default rather than only overwriting it. "Not mentioned" and "deliberately off" must never look alike, so the unset is written explicitly.
+
+A key the bridge does not allow is **dropped and named in the ack**, not refused. A server on a newer protocol than the bridge is ordinary version skew, and failing the turn would make every bridge upgrade a flag day. Restricting the keys is a security boundary rather than tidiness: an open map would let a server point the CLI at another endpoint, or rewrite its search path, inside a process holding the operator's credentials.
+
+**`bridge_prompt`** — how the bridge's own addendum is handled. The addendum carries the session **lifecycle** and nothing else; the server keeps ownership of the voice and the product rules through `system_prompt`, which it is passed beside rather than instead of.
+
+| Mode | Meaning |
+|---|---|
+| `default` | Bridge addendum only. The default for every project that says nothing. |
+| `off` | No addendum at all. The project owns the whole prompt and takes on explaining the lifecycle itself. |
+| `append` | Bridge addendum, then the project's text. The expected way to add project-specific rules. |
+| `replace` | The project's text instead of the bridge addendum. |
+
+Validation is strict, and a contradictory spec is refused with `bridge_prompt_invalid` rather than guessed at — a chat whose instructions are not what either side believes is worse than a refused turn:
+
+| Mode | Text | Result |
+|---|---|---|
+| `default` / `off` | present | **Refused.** The text would be silently discarded. |
+| `append` | absent or empty | **Refused.** Says it is adding something and adds nothing. |
+| `replace` | absent or empty | **Refused.** Would silently mean `off`. |
+
+Server-supplied text is capped at 8 KB. A cap with a clear refusal beats a `spawn E2BIG` at launch, which surfaces as a turn that failed for no visible reason.
+
+**The addendum is generated from the resolved environment, not shipped as a fixed string.** If a project uses `bridge_env` to turn background work back on, an addendum still saying the capability is disabled would be lying to the model about something it can observe directly in its own tool schema. The lifecycle bullets change with the configuration; "one process per turn, nothing survives it" is stated either way, because it is true either way.
+
+`off` and `replace` are the project's right, and both are logged at warning level naming what was dropped: a project that takes them on owns explaining the lifecycle itself.
+
 ### Bridge → Server: `ai_request_ack`
 
-The bridge acknowledges receipt before starting the CLI process, echoing the session it was asked to use:
+The bridge acknowledges receipt before starting the CLI process, echoing the session it was asked to use and what it resolved for this turn:
 
 ```json
 {
   "type": "ai_request_ack",
   "request_id": "req_abc123",
-  "cli_session_id": null
+  "cli_session_id": null,
+  "bridge_session": {
+    "prompt_mode": "default",
+    "prompt_server_text": false,
+    "env_overridden": [],
+    "env_rejected": ["ANTHROPIC_BASE_URL"]
+  }
 }
 ```
 
 **`cli_session_id`**: The `cli_session_id` from the `ai_request` (the session being resumed, or `null` for a fresh start). Informational. The *resulting* session id — the one created or continued — is reported later on the `done` event.
+
+**`bridge_session`**: What the bridge resolved for `bridge_env` and `bridge_prompt`, so a server can **assert** it got what it asked for instead of inferring it from the assistant's behaviour three turns later. Same instinct as `origin` stamping: make it observable rather than deducible.
+
+A bridge that predates this field omits it entirely, so a server must treat absence as *unknown* — never as *defaults applied*.
 
 ### Server → Bridge: `cancel`
 
@@ -1281,6 +1341,7 @@ The server also tracks heartbeats. If no `ping` is received for 2x the heartbeat
 | `working_dir_not_allowed` | The `working_dir` is not inside a root the operator permitted with `--allow-dir` (or none were permitted). Also emitted on a turn that named NOTHING, when the directory its CLI session is remembered in has since been revoked | Operator restarts the bridge with `--allow-dir`, or the server offers only the `workspaces` from `hello`. Terminal: `done` follows |
 | `working_dir_not_found` | The named `working_dir` is inside an allowed root but does not exist, or is not a directory. The bridge never creates it | Check the path. Terminal: `done` follows |
 | `working_dir_changed` | A resume named a different directory from the one its CLI session was started in | Server starts a fresh session deliberately. Terminal: `done` follows |
+| `bridge_prompt_invalid` | The `bridge_prompt` contradicts itself — text with a mode that discards it, `append`/`replace` with nothing to add, an unknown mode, or text over the 8 KB cap | Server fixes the field. Terminal: `done` follows |
 | `attachment_refused` | An attachment URL is not on the connected server's origin, or is not HTTPS | Server fixes the URL (or the operator sets `--api`). Terminal: `done` follows |
 | `attachment_too_large` | An attachment exceeds the per-file or per-request cap | Server sends a smaller file, or the operator raises `--attachment-max-mb` / `--attachment-total-mb`. Terminal: `done` follows |
 | `attachment_failed` | An attachment could not be downloaded, or failed its size/checksum verification | Retry. Terminal: `done` follows |

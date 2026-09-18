@@ -230,6 +230,8 @@ describe('a probe that was simply wrong about the CLI', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, () => {});
 
     await turn('t1');
@@ -362,6 +364,8 @@ describe('the adapter when partial messages are unsupported', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, () => {});
 
     expect(recorded).not.toContain('--include-partial-messages');
@@ -399,6 +403,8 @@ describe('the adapter noticing a rejected flag', () => {
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, () => {});
 
     // The cache must have been dropped: a re-probe now sees the older CLI.

@@ -47,6 +47,7 @@ import {
   formatStderrMessage,
   getBridgeWorkingDir,
   resolveSystemPrompt,
+  joinSystemPrompt,
 } from './env.js';
 import { startTurnTimeouts, clearRequestTimeout, type TurnTimeouts } from './timeout.js';
 import {
@@ -105,9 +106,15 @@ export class GeminiAdapter extends ProviderAdapter {
     // didn't send one, so Gemini's own built-in default never seeps through.
     // No tool manifest is appended — Gemini discovers server-declared tools
     // through the MCP server registered in .gemini/settings.json (see below).
+    // The bridge's lifecycle addendum has no flag of its own here either, so it
+    // joins the server's prompt before the two are concatenated onto the
+    // message. Fresh sessions only, like the system prompt itself.
     let prompt = userMessage;
     if (!cliSessionId) {
-      const systemPrompt = resolveSystemPrompt(request.system_prompt, context.cliIsolation);
+      const systemPrompt = joinSystemPrompt(
+        resolveSystemPrompt(request.system_prompt, context.cliIsolation),
+        context.bridgeAddendum,
+      );
       if (systemPrompt !== null) {
         prompt = buildCombinedPrompt(systemPrompt, userMessage);
       }
@@ -227,7 +234,7 @@ export class GeminiAdapter extends ProviderAdapter {
       let reportedModel: string | null = null;
       let inTextBlock = false;
 
-      const env = buildSpawnEnv(context.requestId);
+      const env = buildSpawnEnv(context.requestId, context.bridgeEnv);
 
       const child = this.spawnCli('gemini', args, env, undefined, context.workingDir);
 

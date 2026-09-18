@@ -145,6 +145,22 @@ export class ClaudeAdapter extends ProviderAdapter {
       args.push('--system-prompt', systemPrompt);
     }
 
+    // The bridge's lifecycle addendum rides BESIDE the server's prompt, never
+    // instead of it. Switching `--system-prompt` to `--append-system-prompt`
+    // would look equivalent and is not: without replacement the CLI falls back
+    // to its built-in coding-agent persona, which leaks command-line-tool
+    // conventions into a chat whose prompt the server owns (the same argument
+    // resolveSystemPrompt() and ISOLATED_FALLBACK_SYSTEM_PROMPT make). It would
+    // also turn `native` isolation into replacement mode by accident, since
+    // appending onto a null prompt is the CLI's own substitute for one.
+    //
+    // Both flags in one invocation is verified to work — the model obeys both.
+    // Re-sent every turn for the same reason as --system-prompt above: neither
+    // is retained across --resume.
+    if (context.bridgeAddendum !== null) {
+      args.push('--append-system-prompt', context.bridgeAddendum);
+    }
+
     // Add model if specified in request options
     if (request.options?.model) {
       args.push('--model', request.options.model);
@@ -321,7 +337,7 @@ export class ClaudeAdapter extends ProviderAdapter {
         flushDeferred();
       };
 
-      const env = buildSpawnEnv(context.requestId);
+      const env = buildSpawnEnv(context.requestId, context.bridgeEnv);
       // Claude CLI refuses to run if CLAUDECODE is set, even to empty string
       delete env['CLAUDECODE'];
 

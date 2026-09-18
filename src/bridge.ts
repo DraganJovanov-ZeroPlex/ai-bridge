@@ -50,6 +50,12 @@ import type { Redaction } from './local/scrub.js';
 import { BridgeMcpServer } from './mcp/server.js';
 import { rootPaths, toWorkspaceRefs, type AllowedRoot } from './workspace/allowlist.js';
 import { resolveWorkingDir, WORKING_DIR_CHANGED } from './workspace/resolve.js';
+import {
+  resolveBridgeEnv,
+  resolveBridgeAddendum,
+  validateBridgePrompt,
+  BRIDGE_PROMPT_INVALID,
+} from './providers/env.js';
 import { SessionWorkingDirs, sessionStorePath } from './workspace/sessions.js';
 import {
   buildAttachmentPreamble,
@@ -1461,11 +1467,47 @@ export class Bridge extends EventEmitter<BridgeEvents> {
     const { request_id } = message;
     const cliSessionId = message.cli_session_id ?? null;
 
-    // Acknowledge receipt, echoing the session the server asked us to use.
+    // A contradictory bridge_prompt is refused before anything acts on it: a
+    // turn whose instructions are not what either side believes is worse than
+    // a turn that did not run. Checked ahead of the ack so the echo below
+    // never describes a turn that was never going to happen.
+    const promptError = validateBridgePrompt(message.bridge_prompt);
+    if (promptError) {
+      log.warn('Refusing request', {
+        requestId: request_id,
+        code: BRIDGE_PROMPT_INVALID,
+        reason: promptError,
+      });
+      this.send({ type: 'ai_request_ack', request_id, cli_session_id: cliSessionId });
+      this.sendStreamEvent(request_id, 'error', {
+        code: BRIDGE_PROMPT_INVALID,
+        message: promptError,
+      });
+      this.sendStreamEvent(request_id, 'done', {});
+      return;
+    }
+
+    // Acknowledge receipt, echoing the session the server asked us to use and
+    // what the bridge resolved for this turn's session defaults. The echo is
+    // what lets a server assert it got what it asked for, instead of inferring
+    // it from the assistant's behaviour several turns later.
+    //
+    // Resolved twice — here and again in executeRequest — because both are
+    // pure functions of the request. Passing the object along instead would
+    // couple the ack path to the execution path for no benefit, and the
+    // execution path must resolve it anyway on the `session_lost` re-issue,
+    // which does not come back through here.
+    const envResolution = resolveBridgeEnv(message.bridge_env);
     this.send({
       type: 'ai_request_ack',
       request_id,
       cli_session_id: cliSessionId,
+      bridge_session: {
+        prompt_mode: message.bridge_prompt?.mode ?? 'default',
+        prompt_server_text: Boolean(message.bridge_prompt?.text),
+        env_overridden: envResolution.overridden,
+        env_rejected: envResolution.rejected,
+      },
     });
 
     // Fresh session: seed the new CLI session with any prior history the
@@ -1768,6 +1810,31 @@ export class Bridge extends EventEmitter<BridgeEvents> {
       }
 
       // Build execution context
+      // Session defaults: what this turn's CLI is spawned with, and what the
+      // bridge tells the model about its own lifecycle. Resolved here rather
+      // than in each adapter so all three spawn with the same answer, and so
+      // the addendum is generated from the environment the turn ACTUALLY gets
+      // — an addendum that describes a different configuration than the one
+      // running is worse than none at all.
+      const bridgeEnvResolution = resolveBridgeEnv(request.bridge_env);
+      const bridgePrompt = resolveBridgeAddendum(
+        request.bridge_prompt,
+        bridgeEnvResolution.values,
+      );
+      if (bridgeEnvResolution.rejected.length > 0) {
+        log.warn('Dropping env keys the bridge does not allow', {
+          requestId: request_id,
+          keys: bridgeEnvResolution.rejected,
+        });
+      }
+      if (bridgePrompt.mode === 'off' || bridgePrompt.mode === 'replace') {
+        log.warn('Server dropped the bridge lifecycle addendum — it owns explaining the lifecycle', {
+          requestId: request_id,
+          mode: bridgePrompt.mode,
+        });
+      }
+
+      // Build execution context
       const context: ExecutionContext = {
         request: effectiveRequest,
         requestId: request_id,
@@ -1780,6 +1847,8 @@ export class Bridge extends EventEmitter<BridgeEvents> {
         silenceTimeoutSeconds: this.serverConfig.silence_timeout ?? DEFAULT_SILENCE_TIMEOUT_SECONDS,
         cliSessionId,
         attachmentDir: saved.length > 0 ? attachmentDirFor(request_id) : null,
+        bridgeEnv: bridgeEnvResolution.values,
+        bridgeAddendum: bridgePrompt.text,
       };
 
       // The adapter emits its own `done`, but the CLI session id is only known

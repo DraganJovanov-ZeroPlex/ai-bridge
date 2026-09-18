@@ -24,7 +24,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelInfo } from '../protocol/types.js';
 import { ProviderAdapter, createFinalizer, type ExecutionContext, type AdapterStreamEvent } from './base.js';
-import { buildSpawnEnv, buildCombinedPrompt, appendStderr, formatStderrMessage, resolveSystemPrompt } from './env.js';
+import { buildSpawnEnv, buildCombinedPrompt, appendStderr, formatStderrMessage, resolveSystemPrompt, joinSystemPrompt } from './env.js';
 import { startTurnTimeouts, clearRequestTimeout, type TurnTimeouts } from './timeout.js';
 import { buildCodexMcpArgs, CODEX_BEARER_ENV_VAR } from '../mcp/cli-config.js';
 import { resumeAwareErrorCode } from './session-error.js';
@@ -251,8 +251,15 @@ export class CodexAdapter extends ProviderAdapter {
     // prompt is concatenated. In isolated mode resolveSystemPrompt() returns
     // a neutral default when the server didn't send one, so Codex's own
     // built-in default never seeps through.
+    // The bridge's lifecycle addendum joins the server's prompt here rather
+    // than riding its own flag: Codex has only the one prompt. Like the system
+    // prompt itself it goes only on a fresh session — a resumed Codex session
+    // already holds both.
     const systemPrompt = !cliSessionId
-      ? resolveSystemPrompt(request.system_prompt, context.cliIsolation)
+      ? joinSystemPrompt(
+          resolveSystemPrompt(request.system_prompt, context.cliIsolation),
+          context.bridgeAddendum,
+        )
       : null;
     if (systemPrompt !== null) {
       args.push('--', buildCombinedPrompt(systemPrompt, userMessage));
@@ -289,7 +296,9 @@ export class CodexAdapter extends ProviderAdapter {
       // match between the codex config and the spawn env.
       const env = buildSpawnEnv(
         context.requestId,
-        context.mcp ? { [CODEX_BEARER_ENV_VAR]: context.mcp.bearerToken } : undefined,
+        context.mcp
+          ? { ...context.bridgeEnv, [CODEX_BEARER_ENV_VAR]: context.mcp.bearerToken }
+          : { ...context.bridgeEnv },
       );
 
       const child = this.spawnCli('codex', args, env, undefined, context.workingDir);

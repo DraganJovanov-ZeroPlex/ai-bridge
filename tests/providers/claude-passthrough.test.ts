@@ -116,6 +116,8 @@ async function replay(
       silenceTimeoutSeconds: source.silenceTimeoutSeconds ?? 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => events.push(e));
   } finally {
     if (scratch !== null) rmSync(scratch, { recursive: true, force: true });

@@ -101,6 +101,8 @@ async function replay(
       silenceTimeoutSeconds: 0,
       cliSessionId: null,
       attachmentDir: null,
+      bridgeEnv: {},
+      bridgeAddendum: null,
     }, (e) => {
       if (e.event === 'done') doneAt = Date.now();
       events.push(e);

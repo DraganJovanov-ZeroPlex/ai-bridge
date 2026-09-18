@@ -77,6 +77,25 @@ export interface ExecutionContext {
    * the whole filesystem, which is a great deal worse.
    */
   attachmentDir: string | null;
+  /**
+   * Environment entries this turn's CLI is spawned with, over the bridge's
+   * inherited environment. `null` values unset a key — see buildSpawnEnv().
+   *
+   * Resolved once per request by the bridge (defaults, then the server's
+   * allow-listed overrides), so every adapter spawns with the same answer and
+   * the acknowledgement the server already received stays true.
+   */
+  bridgeEnv: Record<string, string | null>;
+  /**
+   * The bridge's own addendum to the system prompt, or null when the server
+   * took the lifecycle on itself with `off`.
+   *
+   * Carried separately from `request.system_prompt` because the two have
+   * different owners and different lifetimes: the server owns the voice, the
+   * bridge owns the fact that a turn is a process. Adapters with a dedicated
+   * append flag pass it there; the rest concatenate it.
+   */
+  bridgeAddendum: string | null;
 }
 
 /**
