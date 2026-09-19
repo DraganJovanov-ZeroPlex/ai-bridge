@@ -18,6 +18,60 @@ export AI_BRIDGE_TOKEN=YOUR_CONNECTION_TOKEN
 npx @tetrixdev/ai-bridge
 ```
 
+## Running in the background
+
+A bridge has to be running for the web application to reach this machine, so it
+usually wants to start when the machine does. `install` sets that up — a user
+service on Linux, a launch agent on macOS:
+
+```bash
+ai-bridge install --server wss://your-app.com/api/ai-bridge/ws --token YOUR_TOKEN --allow-dir ~/work
+ai-bridge list
+ai-bridge uninstall your-app-com
+```
+
+**Every install has a name, and more than one can run at once.** The name
+defaults to the server's hostname, so pointing this machine at a second
+application — a test instance beside production is the ordinary case — installs
+a second bridge beside the first rather than replacing it.
+
+Re-running `install` for the same server and the same machine replaces that one,
+which is what you want after rotating a token or changing `--allow-dir`. Doing it
+for a *different* server under the same name is refused:
+
+```
+"your-app-com" is already installed and it is paired to your-app.com,
+and this would point it at staging.your-app.com.
+Give this one a name of its own with --name, or pass --force to replace what is there.
+```
+
+That refusal exists because the alternative is silent: the credentials are
+overwritten, the running service keeps its old ones until something restarts it,
+and the machine then answers a different server than the one it reports to.
+
+Pass `--name` when you want two bridges to the *same* server — one allowed into
+one repository and one into another, say.
+
+| Command | What it does |
+|---|---|
+| `ai-bridge install` | Install or replace a named bridge, and start it |
+| `ai-bridge list` | Every bridge on this machine, what it is doing, and where it points |
+| `ai-bridge uninstall <name>` | Stop one and remove its service and credentials |
+
+On Linux a user service stops when you log out, which on a machine you reach
+over SSH means it stops when you disconnect. `sudo loginctl enable-linger <user>`
+keeps it running; `install` says so when it applies.
+
+On Windows the service is a logon task, and its credentials go in a file the
+task is pointed at with `--env-file`. They used to go in the user's environment
+variables, which is why a Windows machine could hold only one pairing however
+many bridges were installed: two of them reading `AI_BRIDGE_TOKEN` read the same
+one.
+
+`--env-file` is available on its own, too, for anyone running the bridge some
+other way. A flag or an environment variable still wins over the file, so a
+service can be pointed at one and overridden by hand for a single run.
+
 ## Options
 
 | Flag | Environment Variable | Description |

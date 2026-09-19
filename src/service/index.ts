@@ -1,0 +1,107 @@
+/**
+ * Installing, removing and listing the bridges on this machine.
+ *
+ * The rule this module exists for: a second install JOINS unless it is plainly
+ * the same install again. Before, every install wrote the same two paths, so
+ * pointing a machine at a test server took its production pairing with it --
+ * and said "ok" while doing it, because nothing restarts a running service on
+ * `enable --now`, so the machine went on answering the old server until the next
+ * reboot and then answered the new one instead.
+ */
+import { readdirSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { BridgeConfig } from './config.js';
+import { deviceOf, readConfig, replaceable, writeConfig } from './config.js';
+import { nameFromServer, normaliseName, pathsFor } from './naming.js';
+import { install as installService, status, supported, uninstall as removeService } from './platform.js';
+
+export { nameFromServer, normaliseName, pathsFor } from './naming.js';
+export { deviceOf, readConfig } from './config.js';
+
+/** The credentials a service was installed with, for the bridge that service
+ *  starts. Absent or unreadable is not an error here: the flags and the
+ *  environment are still there to supply them, and saying so twice would make a
+ *  perfectly ordinary run look broken. */
+export function readEnvFile(path: string): { server?: string; token?: string; allowDir?: string } {
+  const config = readConfig(path);
+  if (!config) return {};
+  return { server: config.server, token: config.token, allowDir: config.allowDir };
+}
+
+export interface InstallRequest extends BridgeConfig {
+  /** Left out, this is derived from the server's address: one bridge per
+   *  Engram, which is what people actually run. */
+  name?: string | undefined;
+  /** Replace a pairing that is NOT obviously the same one. Never the default:
+   *  the whole point is that overwriting somebody's other server is a decision,
+   *  not a side effect. */
+  force?: boolean | undefined;
+}
+
+export interface Installed {
+  name: string;
+  server: string;
+  device: string | null;
+  allowDir: string | undefined;
+  state: string;
+}
+
+export function installBridge(req: InstallRequest): { name: string; replaced: boolean } {
+  if (!supported()) {
+    throw new Error(
+      'installing a background service is supported on Linux and macOS. On Windows, run the bridge in a window, '
+      + 'or use a scheduled task pointing at the same command.',
+    );
+  }
+  const name = req.name ? normaliseName(req.name) : nameFromServer(req.server);
+  const paths = pathsFor(name);
+  const next: BridgeConfig = { server: req.server, token: req.token, allowDir: req.allowDir };
+
+  const existing = readConfig(paths.env);
+  let replaced = false;
+  if (existing) {
+    const verdict = replaceable(existing, next);
+    if (verdict !== true && !req.force) {
+      throw new Error(
+        `"${name}" is already installed and ${verdict}.\n`
+        + `Give this one a name of its own with --name, or pass --force to replace what is there.`,
+      );
+    }
+    replaced = true;
+  }
+
+  writeConfig(paths.env, next);
+  installService(paths, next);
+  return { name, replaced };
+}
+
+export function uninstallBridge(rawName: string): void {
+  const name = normaliseName(rawName);
+  const paths = pathsFor(name);
+  if (!existsSync(paths.env) && !existsSync(paths.unit)) {
+    throw new Error(`no bridge called "${name}" is installed here.`);
+  }
+  removeService(paths);
+}
+
+/** Every bridge installed for this user, whatever it is currently doing. */
+export function listBridges(): Installed[] {
+  const dir = join(homedir(), '.config', 'ai-bridge');
+  if (!existsSync(dir)) return [];
+  const out: Installed[] = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith('.env')) continue;
+    const name = file.slice(0, -'.env'.length);
+    const config = readConfig(join(dir, file));
+    if (!config) continue;
+    out.push({
+      name,
+      server: config.server,
+      device: deviceOf(config.server),
+      allowDir: config.allowDir,
+      state: status(pathsFor(name)),
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}

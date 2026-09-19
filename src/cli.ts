@@ -28,6 +28,7 @@ import { loadOrCreateIdentity, saveIdentity, fingerprint, type Identity } from '
 import { buildAllowedRoots, type AllowedRoot } from './workspace/allowlist.js';
 import { resolveApiOrigin } from './attachments/origin.js';
 import { enrol, type EngramConfig } from './local/engram.js';
+import { installBridge, listBridges, pathsFor, readEnvFile, uninstallBridge } from './service/index.js';
 
 const log = createLogger('CLI');
 
@@ -100,6 +101,14 @@ export function resolveOperatorPosture(
 // ---------------------------------------------------------------------------
 
 const program = new Command();
+
+// Options after a subcommand name belong to that subcommand.
+//
+// Without this, the program's own `-s, --server` swallows `install --server`
+// and the subcommand reports the option missing while it is plainly there --
+// because the two share a flag, which they should: it is the same thing being
+// named, once to connect now and once to record for later.
+program.enablePositionalOptions();
 
 program
   .name('ai-bridge')
@@ -198,6 +207,10 @@ program
     '100',
   )
   .option(
+    '--env-file <path>',
+    'Read AI_BRIDGE_SERVER, AI_BRIDGE_TOKEN and AI_BRIDGE_ALLOW_DIR from this file. What `ai-bridge install` points a service at, so a token lives in one file with one owner rather than inside a service definition anybody can print.',
+  )
+  .option(
     '--log-file <path>',
     'Also append logs to this file (or set AI_BRIDGE_LOG_FILE env var). Rotates once past 5 MB, keeping one previous copy.',
     process.env['AI_BRIDGE_LOG_FILE'],
@@ -207,8 +220,20 @@ program
     localTools: boolean; engram?: string; engramToken?: string;
     deviceLabel: string; deviceMode: string; identityFile: string; localDataDir: string;
     allowDir: string[]; api?: string; keepAttachments: boolean; allowNative: boolean;
-    attachmentMaxMb: string; attachmentTotalMb: string;
+    attachmentMaxMb: string; attachmentTotalMb: string; envFile?: string;
   }) => {
+    // Before anything reads server or token. The file is the lowest precedence
+    // of the three sources -- a flag or an environment variable still wins --
+    // so a service can be pointed at one and still be overridden by hand for a
+    // one-off run.
+    if (opts.envFile) {
+      const fromFile = readEnvFile(opts.envFile);
+      opts.server ??= fromFile.server;
+      opts.token ??= fromFile.token;
+      if (fromFile.allowDir && (!opts.allowDir || opts.allowDir.length === 0)) {
+        opts.allowDir = [fromFile.allowDir];
+      }
+    }
     // Enable debug logging if requested
     if (opts.debug) {
       setDebug(true);
@@ -502,6 +527,86 @@ program
  * @param argv1     The script path Node was invoked with (`process.argv[1]`).
  * @param moduleUrl This module's URL (`import.meta.url`).
  */
+/* ------------------------- running as a background service ------------------------- */
+
+/**
+ * Installing a bridge so it starts with the machine.
+ *
+ * Here rather than in each server's setup script, because every one of them was
+ * writing the same two fixed paths -- which made a second server's install
+ * overwrite the first's credentials, report success, and leave the machine
+ * answering the old server until something restarted it.
+ */
+program
+  .command('install')
+  .description('Install this bridge as a background service that starts with the machine')
+  .requiredOption('-s, --server <url>', 'WebSocket server URL, as the web application gave it to you')
+  .requiredOption('-t, --token <token>', 'Pairing token, as the web application gave it to you')
+  .option('--allow-dir <path>', 'The one folder the assistant may read, write and run things inside')
+  .option('--name <name>', 'What to call this bridge. Defaults to the server\'s hostname, so one bridge per server.')
+  .option('--force', 'Replace an install of this name even if it is paired to a different server or machine', false)
+  .action((opts: { server: string; token: string; allowDir?: string; name?: string; force: boolean }) => {
+    try {
+      const { name, replaced } = installBridge({
+        server: opts.server, token: opts.token, allowDir: opts.allowDir,
+        name: opts.name, force: opts.force,
+      });
+      const paths = pathsFor(name);
+      console.log(`${replaced ? 'Replaced' : 'Installed'} "${name}", running in the background.`);
+      if (process.platform === 'darwin') {
+        console.log(`  logs:  tail -f ${paths.log}`);
+        console.log(`  stop:  ai-bridge uninstall ${name}`);
+      } else {
+        console.log(`  status:  systemctl --user status ${paths.label}`);
+        console.log(`  logs:    journalctl --user -u ${paths.label} -f`);
+        console.log(`  stop:    ai-bridge uninstall ${name}`);
+      }
+      // A user service stops when you log out, which on a machine reached over
+      // SSH means it stops the moment you disconnect.
+      if (process.platform === 'linux') {
+        console.log(`\nIf this machine is one you reach over SSH, keep it running after you log out:`);
+        console.log(`  sudo loginctl enable-linger ${process.env['USER'] ?? 'you'}`);
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+program
+  .command('uninstall')
+  .description('Stop an installed bridge and remove it')
+  .argument('<name>', 'Which one, as `ai-bridge list` shows it')
+  .action((name: string) => {
+    try {
+      uninstallBridge(name);
+      console.log(`Removed "${name}".`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+program
+  .command('list')
+  .description('Every bridge installed on this machine, and what it is doing')
+  .action(() => {
+    const rows = listBridges();
+    if (!rows.length) {
+      console.log('No bridges are installed here. `ai-bridge install --server ... --token ...` adds one.');
+      return;
+    }
+    for (const r of rows) {
+      const where = r.device ? `${hostOnly(r.server)} (device ${r.device.slice(0, 8)}…)` : hostOnly(r.server);
+      console.log(`${r.name.padEnd(24)} ${r.state.padEnd(12)} ${where}`);
+      if (r.allowDir) console.log(`${' '.repeat(24)} ${' '.repeat(12)} may work in ${r.allowDir}`);
+    }
+  });
+
+function hostOnly(url: string): string {
+  try { return new URL(url).host; } catch { return url; }
+}
+
 export function isMainModule(argv1: string | undefined, moduleUrl: string): boolean {
   if (!argv1) return false;
   try {
