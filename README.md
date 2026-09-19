@@ -62,8 +62,15 @@ On Linux a user service stops when you log out, which on a machine you reach
 over SSH means it stops when you disconnect. `sudo loginctl enable-linger <user>`
 keeps it running; `install` says so when it applies.
 
-Windows has no equivalent here yet: run the bridge in a window, or point a
-scheduled task at the same command.
+On Windows the service is a logon task, and its credentials go in a file the
+task is pointed at with `--env-file`. They used to go in the user's environment
+variables, which is why a Windows machine could hold only one pairing however
+many bridges were installed: two of them reading `AI_BRIDGE_TOKEN` read the same
+one.
+
+`--env-file` is available on its own, too, for anyone running the bridge some
+other way. A flag or an environment variable still wins over the file, so a
+service can be pointed at one and overridden by hand for a single run.
 
 ## Options
 

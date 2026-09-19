@@ -28,7 +28,7 @@ import { loadOrCreateIdentity, saveIdentity, fingerprint, type Identity } from '
 import { buildAllowedRoots, type AllowedRoot } from './workspace/allowlist.js';
 import { resolveApiOrigin } from './attachments/origin.js';
 import { enrol, type EngramConfig } from './local/engram.js';
-import { installBridge, listBridges, pathsFor, uninstallBridge } from './service/index.js';
+import { installBridge, listBridges, pathsFor, readEnvFile, uninstallBridge } from './service/index.js';
 
 const log = createLogger('CLI');
 
@@ -207,6 +207,10 @@ program
     '100',
   )
   .option(
+    '--env-file <path>',
+    'Read AI_BRIDGE_SERVER, AI_BRIDGE_TOKEN and AI_BRIDGE_ALLOW_DIR from this file. What `ai-bridge install` points a service at, so a token lives in one file with one owner rather than inside a service definition anybody can print.',
+  )
+  .option(
     '--log-file <path>',
     'Also append logs to this file (or set AI_BRIDGE_LOG_FILE env var). Rotates once past 5 MB, keeping one previous copy.',
     process.env['AI_BRIDGE_LOG_FILE'],
@@ -216,8 +220,20 @@ program
     localTools: boolean; engram?: string; engramToken?: string;
     deviceLabel: string; deviceMode: string; identityFile: string; localDataDir: string;
     allowDir: string[]; api?: string; keepAttachments: boolean; allowNative: boolean;
-    attachmentMaxMb: string; attachmentTotalMb: string;
+    attachmentMaxMb: string; attachmentTotalMb: string; envFile?: string;
   }) => {
+    // Before anything reads server or token. The file is the lowest precedence
+    // of the three sources -- a flag or an environment variable still wins --
+    // so a service can be pointed at one and still be overridden by hand for a
+    // one-off run.
+    if (opts.envFile) {
+      const fromFile = readEnvFile(opts.envFile);
+      opts.server ??= fromFile.server;
+      opts.token ??= fromFile.token;
+      if (fromFile.allowDir && (!opts.allowDir || opts.allowDir.length === 0)) {
+        opts.allowDir = [fromFile.allowDir];
+      }
+    }
     // Enable debug logging if requested
     if (opts.debug) {
       setDebug(true);

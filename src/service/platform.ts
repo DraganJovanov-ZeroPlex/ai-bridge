@@ -14,11 +14,11 @@ import { dirname } from 'node:path';
 import type { BridgeConfig } from './config.js';
 import type { Paths } from './naming.js';
 
-export type Supported = 'linux' | 'darwin';
+export type Supported = 'linux' | 'darwin' | 'win32';
 
 export function supported(): Supported | null {
   const os = platform();
-  return os === 'linux' || os === 'darwin' ? os : null;
+  return os === 'linux' || os === 'darwin' || os === 'win32' ? os : null;
 }
 
 /** Where `npx` actually is. A login shell's PATH is not a service's PATH, and
@@ -39,7 +39,34 @@ const run = (cmd: string, args: string[]): void => {
 export function install(paths: Paths, config: BridgeConfig): void {
   const os = supported();
   if (os === 'darwin') return installLaunchd(paths, config);
+  if (os === 'win32') return installScheduledTask(paths, config);
   return installSystemd(paths, config);
+}
+
+/**
+ * Windows, as a logon task.
+ *
+ * The credentials go in a file and the task is pointed at it with --env-file.
+ * They used to go in the USER's environment variables, which is the reason a
+ * Windows machine could hold exactly one pairing however many bridges were
+ * installed: two services reading AI_BRIDGE_TOKEN both read the same one, and
+ * the second install silently retargeted the first.
+ */
+function installScheduledTask(paths: Paths, config: BridgeConfig): void {
+  mkdirSync(dirname(paths.env), { recursive: true });
+  const args = ['--env-file', paths.env, '--log-file', paths.log];
+  const command = `ai-bridge ${args.map((a) => `"${a}"`).join(' ')}`;
+  // /F replaces a task of the same name, which is what an install of the same
+  // name means. A different name is a different task and is left alone.
+  run('schtasks', [
+    '/Create', '/F',
+    '/TN', paths.label,
+    '/SC', 'ONLOGON',
+    '/RL', 'LIMITED',
+    '/TR', command,
+  ]);
+  try { run('schtasks', ['/End', '/TN', paths.label]); } catch { /* not running */ }
+  run('schtasks', ['/Run', '/TN', paths.label]);
 }
 
 function installSystemd(paths: Paths, config: BridgeConfig): void {
@@ -71,13 +98,17 @@ WantedBy=default.target
 
 function installLaunchd(paths: Paths, config: BridgeConfig): void {
   const home = homedir();
-  const args = ['-y', '--ignore-scripts', '@tetrixdev/ai-bridge'];
-  if (config.allowDir) args.push('--allow-dir', config.allowDir);
+  // The credentials are read from the file rather than written into the plist.
+  // A plist is readable by everyone by default, and `launchctl print` shows its
+  // environment -- so a token in there is a token on somebody's screen the next
+  // time they debug the agent.
+  const args = ['-y', '--ignore-scripts', '@tetrixdev/ai-bridge', '--env-file', paths.env];
   mkdirSync(dirname(paths.unit), { recursive: true });
   mkdirSync(dirname(paths.log), { recursive: true });
-  // launchd has no EnvironmentFile, so the credentials go in the plist and the
-  // plist is locked down. Mode is set on write rather than after: a plist is
-  // readable by everyone by default and a token in it would be too.
+  // launchd has no EnvironmentFile, so the agent is pointed at ours with
+  // --env-file. That keeps the token in one file with one owner instead of in
+  // the plist, which is world readable by default and which `launchctl print`
+  // will happily show to anyone debugging the agent.
   writeFileSync(paths.unit, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -89,8 +120,6 @@ function installLaunchd(paths: Paths, config: BridgeConfig): void {
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>AI_BRIDGE_SERVER</key><string>${config.server}</string>
-    <key>AI_BRIDGE_TOKEN</key><string>${config.token}</string>
     <key>PATH</key><string>${home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
@@ -108,6 +137,12 @@ function installLaunchd(paths: Paths, config: BridgeConfig): void {
 
 export function uninstall(paths: Paths): void {
   const os = supported();
+  if (os === 'win32') {
+    try { run('schtasks', ['/End', '/TN', paths.label]); } catch { /* not running */ }
+    try { run('schtasks', ['/Delete', '/F', '/TN', paths.label]); } catch { /* already gone */ }
+    if (existsSync(paths.env)) rmSync(paths.env);
+    return;
+  }
   if (os === 'darwin') {
     try { run('launchctl', ['unload', paths.unit]); } catch { /* already gone */ }
   } else {
@@ -124,6 +159,10 @@ export function uninstall(paths: Paths): void {
 /** What the operating system says this service is doing, for `list`. */
 export function status(paths: Paths): string {
   try {
+    if (supported() === 'win32') {
+      const out = execFileSync('schtasks', ['/Query', '/TN', paths.label], { encoding: 'utf8' });
+      return /Running/i.test(out) ? 'active' : 'ready';
+    }
     if (supported() === 'darwin') {
       const out = execFileSync('launchctl', ['list'], { encoding: 'utf8' });
       return out.split('\n').some((l) => l.endsWith(paths.label)) ? 'loaded' : 'not loaded';

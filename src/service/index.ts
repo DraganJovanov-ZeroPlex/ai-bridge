@@ -19,6 +19,16 @@ import { install as installService, status, supported, uninstall as removeServic
 export { nameFromServer, normaliseName, pathsFor } from './naming.js';
 export { deviceOf, readConfig } from './config.js';
 
+/** The credentials a service was installed with, for the bridge that service
+ *  starts. Absent or unreadable is not an error here: the flags and the
+ *  environment are still there to supply them, and saying so twice would make a
+ *  perfectly ordinary run look broken. */
+export function readEnvFile(path: string): { server?: string; token?: string; allowDir?: string } {
+  const config = readConfig(path);
+  if (!config) return {};
+  return { server: config.server, token: config.token, allowDir: config.allowDir };
+}
+
 export interface InstallRequest extends BridgeConfig {
   /** Left out, this is derived from the server's address: one bridge per
    *  Engram, which is what people actually run. */

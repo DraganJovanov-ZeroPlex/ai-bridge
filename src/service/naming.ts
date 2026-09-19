@@ -61,6 +61,16 @@ export interface Paths {
 export function pathsFor(name: string): Paths {
   const home = homedir();
   const os = platform();
+  if (os === 'win32') {
+    const root = process.env['LOCALAPPDATA'] || join(home, 'AppData', 'Local');
+    return {
+      env: join(root, 'ai-bridge', `${name}.env`),
+      // A scheduled task has no file of its own; the name IS the definition.
+      unit: '',
+      label: `AI Bridge (${name})`,
+      log: join(root, 'ai-bridge', `${name}.log`),
+    };
+  }
   if (os === 'darwin') {
     return {
       env: join(home, '.config', 'ai-bridge', `${name}.env`),
