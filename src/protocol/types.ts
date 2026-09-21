@@ -382,6 +382,35 @@ export interface PostureMessage {
 }
 
 /** Union of all messages the bridge sends to the server. */
+/**
+ * What is left of the subscription the CLI on this machine is signed in as.
+ *
+ * Answers a `usage_request` and echoes its id. The bridge ALWAYS answers, including when it
+ * cannot help: a request that goes unanswered is indistinguishable from a bridge too old to
+ * know the question, and the server would have to wait out a timeout to find out.
+ *
+ * The credential itself is never part of this. Only figures cross the wire.
+ */
+export interface UsageResultMessage {
+  type: 'usage_result';
+  /** Echoes the id of the usage_request this answers. */
+  id: string;
+  ok: boolean;
+  /** Present when ok. Allowance windows, already labelled, in the order the CLI reports. */
+  limits?: UsageLimitFrame[];
+  /** Present when not ok: `unsupported`, `no_credential` or `failed`. */
+  reason?: string;
+}
+
+/** One allowance window. `label` is composed bridge-side; a consumer renders it as given. */
+export interface UsageLimitFrame {
+  label: string;
+  percent: number;
+  resets_at?: string;
+  kind?: string;
+  group?: string;
+}
+
 export type BridgeToServerMessage =
   | HelloMessage
   | AiRequestAckMessage
@@ -392,6 +421,7 @@ export type BridgeToServerMessage =
   | ProvidersUpdateMessage
   | PostureMessage
   | LocalResultMessage
+  | UsageResultMessage
   | StreamChunkMessage
   | StreamEndMessage
   | CancelledMessage;
@@ -737,6 +767,18 @@ export interface LocalCallMessage {
 }
 
 /** Union of all messages the server sends to the bridge. */
+/**
+ * Ask the bridge what is left of the subscription its CLI is signed in as.
+ *
+ * Carries nothing but an id: the bridge already knows which CLI it runs and holds the only
+ * credential that could answer, so there is nothing for the server to say. Answered by
+ * exactly one `usage_result` echoing the id.
+ */
+export interface UsageRequestMessage {
+  type: 'usage_request';
+  id: string;
+}
+
 export type ServerToBridgeMessage =
   | WelcomeMessage
   | AiRequestMessage
@@ -747,6 +789,7 @@ export type ServerToBridgeMessage =
   | ConnectionErrorMessage
   | TokenRefreshMessage
   | LocalCallMessage
+  | UsageRequestMessage
   | AttachmentReadMessage
   | StreamCancelMessage
   | CancelMessage;
