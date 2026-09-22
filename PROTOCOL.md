@@ -560,13 +560,18 @@ One request, one reply, correlated by `id`, exactly like `local_call` / `local_r
 ```json
 {
   "type": "usage_request",
-  "id": "usage-7f3c1a"
+  "id": "usage-7f3c1a",
+  "provider": "claude"
 }
 ```
 
-- **`id`** — echoed back on the reply. The only field: the bridge already knows which CLI it
-  runs and holds the only credential that could answer, so there is nothing for the server to
-  tell it.
+- **`id`** — echoed back on the reply.
+- **`provider`** — optional, the CLI to report on, by the name it is detected under. **Send it
+  whenever you know.** A machine can have several CLIs installed and only the server knows
+  which one is answering a given conversation. Without it the bridge answers only when the
+  choice is unambiguous (exactly one CLI installed) and otherwise replies `unsupported`,
+  because reporting one CLI's subscription while another is answering the conversation is
+  worse than reporting nothing: the number looks right.
 
 ### Bridge → Server: `usage_result`
 

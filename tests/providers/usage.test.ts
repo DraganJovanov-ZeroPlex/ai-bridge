@@ -18,11 +18,16 @@ import type { BridgeToServerMessage, UsageResultMessage } from '../../src/protoc
 import { readClaudeUsage } from '../../src/providers/usage.js';
 
 /** A bridge with its socket replaced by a list, so the real dispatch runs. */
-function harness() {
+function harness(providers: string[] = ['claude']) {
   const bridge = new Bridge({
     serverUrl: 'wss://example.test/bridge',
     token: 'irrelevant',
-    providers: [],
+    providers: providers.map((name) => ({
+      name,
+      version: '1.0.0',
+      available: true,
+      supports_streaming: true,
+    })) as never,
     adapters: new Map<string, ProviderAdapter>(),
     // Never the operator's real store — the suite must not overwrite it.
     sessionStorePath: null,
@@ -39,7 +44,8 @@ function harness() {
 
   return {
     sent,
-    deliver: (id: string) => inner.onMessage(Buffer.from(JSON.stringify({ type: 'usage_request', id }))),
+    deliver: (id: string, provider?: string) =>
+      inner.onMessage(Buffer.from(JSON.stringify({ type: 'usage_request', id, ...(provider ? { provider } : {}) }))),
     answer: async (): Promise<UsageResultMessage> => {
       await vi.waitFor(() => expect(sent).toHaveLength(1), { timeout: 15_000 });
       return sent[0] as UsageResultMessage;
@@ -60,14 +66,26 @@ function vendorReturns(status: number, body?: unknown) {
 }
 
 describe('usage_request wiring', () => {
+  const HOME = process.env['HOME'];
+
+  beforeEach(() => {
+    // BOTH of these are load-bearing. Without the home override this reads the operator's real
+    // ~/.claude/.credentials.json, and without the fetch stub it makes a LIVE, AUTHENTICATED,
+    // BILLABLE call to the vendor on every run of the suite — spending the developer's own
+    // subscription to assert that a frame came back. An earlier version of this file did
+    // exactly that, on the assumption that a build machine has no credential.
+    process.env['HOME'] = '/nonexistent-home-for-tests';
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('the network is not available in tests'); }));
+  });
+
   afterEach(() => {
+    if (HOME === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = HOME;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  it('answers with the same id even when it cannot help', async () => {
-    // No credential on a CI machine, so this takes the no_credential path. The point is
-    // that SOMETHING comes back, addressed to the request.
+  it('answers the same id, and says WHY it cannot help rather than merely answering', async () => {
     const h = harness();
     h.deliver('req-abc');
 
@@ -75,8 +93,10 @@ describe('usage_request wiring', () => {
 
     expect(answer.type).toBe('usage_result');
     expect(answer.id).toBe('req-abc');
-    expect(typeof answer.ok).toBe('boolean');
-    if (!answer.ok) expect(answer.reason).toBeTruthy();
+    // Asserting the actual outcome, not just that something came back: the previous version
+    // checked only `typeof ok === 'boolean'`, which a completely broken bridge would satisfy.
+    expect(answer.ok).toBe(false);
+    expect(answer.reason).toBe('no_credential');
   });
 
   it('never sends the credential back, only figures', async () => {
@@ -86,6 +106,36 @@ describe('usage_request wiring', () => {
     const answer = await h.answer();
 
     expect(JSON.stringify(answer)).not.toMatch(/accessToken|Bearer|sk-ant|ghp_/i);
+  });
+
+  it('refuses to report when the CLI asked about is not Claude', async () => {
+    const h = harness(['codex']);
+    h.deliver('req-codex', 'codex');
+
+    const answer = await h.answer();
+
+    expect(answer).toMatchObject({ ok: false, reason: 'unsupported' });
+  });
+
+  it('refuses to guess when a machine has several CLIs and the server named none', async () => {
+    // Answering Claude's figures here would label one subscription as another's, which is
+    // worse than reporting nothing because the number looks right.
+    const h = harness(['claude', 'codex']);
+    h.deliver('req-ambiguous');
+
+    const answer = await h.answer();
+
+    expect(answer).toMatchObject({ ok: false, reason: 'unsupported' });
+  });
+
+  it('answers for Claude when the server names it, even on a multi-CLI machine', async () => {
+    const h = harness(['claude', 'codex']);
+    h.deliver('req-named', 'claude');
+
+    const answer = await h.answer();
+
+    // Gets as far as reading the credential, which the stubbed home does not have.
+    expect(answer).toMatchObject({ ok: false, reason: 'no_credential' });
   });
 });
 

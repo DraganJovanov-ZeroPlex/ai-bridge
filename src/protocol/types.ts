@@ -777,6 +777,15 @@ export interface LocalCallMessage {
 export interface UsageRequestMessage {
   type: 'usage_request';
   id: string;
+  /**
+   * Which CLI to report on, by the name it is detected under.
+   *
+   * Optional, but supply it whenever the server knows: a machine can have several CLIs
+   * installed, and only the server knows which one is answering a given conversation. Without
+   * it the bridge will answer only when the choice is unambiguous, rather than guess and label
+   * one subscription's figures as another's.
+   */
+  provider?: string;
 }
 
 export type ServerToBridgeMessage =
