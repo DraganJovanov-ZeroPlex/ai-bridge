@@ -35,10 +35,12 @@ import type {
   StreamEventData,
   DoneData,
   LocalCallMessage,
+  UsageRequestMessage,
 } from './protocol/types.js';
 import { PROTOCOL_VERSION, BRIDGE_VERSION } from './protocol/version.js';
 import { ProviderAdapter, type ExecutionContext, type AdapterStreamEvent } from './providers/base.js';
 import { detectProviders } from './providers/detector.js';
+import { readClaudeUsage } from './providers/usage.js';
 import { ToolResolver } from './tools/resolver.js';
 import { LOCAL_EXECUTION_OFF, refusalReason, runsLocally, type LocalExecutionConfig } from './local/gate.js';
 import { runLocalTool } from './local/executor.js';
@@ -718,6 +720,58 @@ export class Bridge extends EventEmitter<BridgeEvents> {
    * `local_result` carrying the id the call arrived with, so a server that
    * sent ten calls can tell which one answered.
    */
+  /**
+   * Answer a usage_request, once, whatever happens.
+   *
+   * Never throws and never stays silent: an unanswered request leaves the asker waiting out
+   * a timeout and then unable to tell "this bridge is too old" from "the vendor was slow".
+   */
+  /**
+   * Which CLI a usage_request is about, or null when that cannot be known.
+   *
+   * The server's answer wins when it gives one. Otherwise this only answers for a machine
+   * where there is nothing to be ambiguous about — exactly one CLI installed.
+   */
+  private usageTargetFor(requested: string | undefined): string | null {
+    const available = this.providers.filter((p) => p.available).map((p) => p.name);
+
+    if (typeof requested === 'string' && requested !== '') {
+      return available.includes(requested) ? requested : null;
+    }
+
+    return available.length === 1 ? (available[0] ?? null) : null;
+  }
+
+  private handleUsageRequestMessage(message: UsageRequestMessage): void {
+    const target = this.usageTargetFor(message.provider);
+
+    // Only Claude has a subscription allowance to report. Anything else, including "we cannot
+    // tell which CLI is meant", is answered as unsupported rather than guessed at: reporting
+    // one CLI's subscription while another is answering the conversation is worse than
+    // reporting nothing, because the number looks right.
+    if (target !== 'claude') {
+      this.send({ type: 'usage_result', id: message.id, ok: false, reason: 'unsupported' });
+      return;
+    }
+
+    readClaudeUsage().then(
+      (answer) => {
+        this.send(
+          answer.ok
+            ? { type: 'usage_result', id: message.id, ok: true, limits: answer.limits }
+            : { type: 'usage_result', id: message.id, ok: false, reason: answer.reason },
+        );
+      },
+      (err: unknown) => {
+        log.error('could not answer a usage_request', {
+          id: message.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.send({ type: 'usage_result', id: message.id, ok: false, reason: 'failed' });
+      },
+    );
+  }
+
   private handleLocalCallMessage(message: LocalCallMessage): void {
     void handleLocalCall(
       {
@@ -927,6 +981,10 @@ export class Bridge extends EventEmitter<BridgeEvents> {
       case 'token_refresh':
         this.adoptRefreshedToken(message.token, 'token_refresh message');
         break;
+      case 'usage_request':
+        this.handleUsageRequestMessage(message);
+        break;
+
       case 'local_call':
         this.handleLocalCallMessage(message);
         break;

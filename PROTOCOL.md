@@ -10,6 +10,7 @@ Specification for the WebSocket protocol between `@tetrixdev/ai-bridge` (npm, cl
 - [Connection](#connection)
 - [Handshake](#handshake)
 - [Local Calls](#local-calls)
+- [Subscription Usage](#subscription-usage)
 - [AI Requests](#ai-requests)
 - [Conversation Continuity](#conversation-continuity)
 - [Streaming Events](#streaming-events)
@@ -542,6 +543,88 @@ Per space: at most **2** local calls in flight, and starts spaced at least
 **250ms** apart. A third concurrent call for the same space is refused with
 `ok: false` rather than queued, because a queue is the same fork bomb with a
 delay. A caller that sees this is usually re-rendering or retrying in a loop.
+
+---
+
+## Subscription Usage
+
+Where a CLI runs on somebody's own subscription, that subscription has allowances that refill
+on a rolling basis, and an application may want to show a person where they stand. The
+credential that could answer for them lives on the machine, with the CLI, and is deliberately
+never sent to the server — so the server asks, and the bridge answers with figures only.
+
+One request, one reply, correlated by `id`, exactly like `local_call` / `local_result`.
+
+### Server → Bridge: `usage_request`
+
+```json
+{
+  "type": "usage_request",
+  "id": "usage-7f3c1a",
+  "provider": "claude"
+}
+```
+
+- **`id`** — echoed back on the reply.
+- **`provider`** — optional, the CLI to report on, by the name it is detected under. **Send it
+  whenever you know.** A machine can have several CLIs installed and only the server knows
+  which one is answering a given conversation. Without it the bridge answers only when the
+  choice is unambiguous (exactly one CLI installed) and otherwise replies `unsupported`,
+  because reporting one CLI's subscription while another is answering the conversation is
+  worse than reporting nothing: the number looks right.
+
+### Bridge → Server: `usage_result`
+
+```json
+{
+  "type": "usage_result",
+  "id": "usage-7f3c1a",
+  "ok": true,
+  "limits": [
+    { "label": "Current session", "percent": 32, "resets_at": "2026-09-21T11:10:00+00:00", "kind": "session", "group": "session" },
+    { "label": "This week", "percent": 43, "resets_at": "2026-09-24T00:00:00+00:00", "kind": "weekly_all", "group": "weekly" }
+  ]
+}
+```
+
+```json
+{
+  "type": "usage_result",
+  "id": "usage-7f3c1a",
+  "ok": false,
+  "reason": "no_credential"
+}
+```
+
+**The bridge always answers**, for every `usage_request` carrying an id, including one it
+cannot help with. A request that goes unanswered is indistinguishable from a bridge too old to
+know the frame, and the server would have to wait out a timeout to find out which it was.
+
+**`limits`** is present when `ok`. Each entry describes one allowance window:
+
+- **`label`** — human-readable, composed by the bridge (`"Current session"`, `"This week"`,
+  `"Fable this week"`). Composed HERE on purpose: this is the layer that knows which CLI
+  answered and what its vocabulary means. A consumer renders the list in the order given,
+  using these labels, and therefore needs no change when the vendor renames a window or adds
+  one. A window kind the bridge has not met is still labelled, from the kind itself.
+- **`percent`** — whole percent consumed, clamped to 0-100.
+- **`resets_at`** — ISO 8601 instant the allowance refills. Absent when the CLI does not say.
+- **`kind`** / **`group`** — the CLI's own identifiers, passed through untranslated, for a
+  consumer that wants to group or filter. Neither is required to render a row.
+
+**`reason`** is present when not `ok`:
+
+- **`unsupported`** — this CLI has no notion of a subscription allowance.
+- **`no_credential`** — it has one, but nobody is signed in, or the sign-in has expired.
+- **`failed`** — it tried and could not.
+
+**Money is deliberately absent.** The vendor's answer may also carry spend and credit
+balances; they are dropped here rather than forwarded, so an allowance figure cannot be
+mistaken for a bill by anything downstream.
+
+**Claude.** `readClaudeUsage()` reads `~/.claude/.credentials.json` and calls
+`GET https://api.anthropic.com/api/oauth/usage`. The token is re-read on every request
+because the CLI refreshes it in place. Other CLIs answer `unsupported`.
 
 ---
 
