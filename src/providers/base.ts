@@ -17,6 +17,7 @@ import type {
   StreamEventData,
 } from '../protocol/types.js';
 import type { McpConnection } from '../mcp/cli-config.js';
+import type { TurnInputPort } from './turn-input.js';
 import { formatStderrMessage, getBridgeWorkingDir } from './env.js';
 
 /** A stream event emitted by the adapter. */
@@ -96,6 +97,24 @@ export interface ExecutionContext {
    * append flag pass it there; the rest concatenate it.
    */
   bridgeAddendum: string | null;
+  /**
+   * Present when this turn runs with its input open (`options.accepts_input`,
+   * confirmed by the ack's `input_open`). The adapter keeps the CLI's stdin
+   * open, opens the port once the CLI is running, and ends it when it closes
+   * stdin. Absent or null: the turn runs exactly as it always did.
+   */
+  turnInput?: TurnInputPort | null;
+}
+
+/** How spawnCli() treats the child's stdin. */
+export interface SpawnOptions {
+  /**
+   * Write `stdinInput` and leave stdin OPEN, returning the writable. Only for
+   * a CLI told to read a stream of messages there (Claude's
+   * `--input-format stream-json`): every CLI in its default mode hangs on a
+   * live stdin pipe.
+   */
+  keepStdinOpen?: boolean;
 }
 
 /**
@@ -284,8 +303,12 @@ export abstract class ProviderAdapter {
    *     the safe directory rather than the bridge's own cwd.
    *   - `stdio` keeps stdin closed by default — every CLI hangs if stdin is a
    *     live pipe — unless `stdinInput` is given, in which case stdin is piped,
-   *     the input written, and the pipe immediately closed. stdout/stderr stay
-   *     piped for streaming.
+   *     the input written, and the pipe immediately closed (or, with
+   *     `keepStdinOpen`, left open for the adapter to write more and close).
+   *     stdout/stderr stay piped for streaming.
+   *   - The CLI is spawned `detached` (outside Windows), so it leads its own
+   *     process group and stopTurn() can signal the group — everything the CLI
+   *     started in it goes with the turn.
    *
    * The caller still builds its own `env` (provider-specific quirks like
    * Claude's CLAUDECODE deletion or Codex's conditional PATH belong with the
@@ -297,6 +320,7 @@ export abstract class ProviderAdapter {
    * @param env      Fully-built environment for the child process.
    * @param stdinInput  Prompt to write to stdin, when the CLI reads it there.
    * @param cwd      Directory to spawn in. Defaults to the empty scratch dir.
+   * @param options  See SpawnOptions.
    * @returns The spawned ChildProcess.
    */
   protected spawnCli(
@@ -305,6 +329,7 @@ export abstract class ProviderAdapter {
     env: NodeJS.ProcessEnv,
     stdinInput?: string,
     cwd?: string,
+    options: SpawnOptions = {},
   ): ChildProcessByStdio<Writable | null, Readable, Readable> {
     // stdin defaults to 'ignore' (null) — a live stdin pipe hangs most CLIs.
     // When stdinInput is given we pipe it, write it, and immediately end() so
@@ -312,10 +337,17 @@ export abstract class ProviderAdapter {
     // how Claude is fed: a large prompt as a positional argv entry exceeds the
     // OS per-argument size limit and the spawn dies with `spawn E2BIG`.
     // stdout/stderr stay piped for streaming.
+    //
+    // Detached, so the CLI leads its own process group and stopping the turn
+    // can signal the group rather than the CLI alone (see stopTurn()). Not on
+    // Windows, where `detached` means a new console window instead and there
+    // is no group to signal. The child is not unref'd: the bridge still waits
+    // on it and reads its pipes exactly as before.
     const child = spawn(command, args, {
       env,
       cwd: cwd ?? getBridgeWorkingDir(),
       stdio: [stdinInput !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     }) as ChildProcessByStdio<Writable | null, Readable, Readable>;
 
     if (stdinInput !== undefined && child.stdin) {
@@ -326,9 +358,14 @@ export abstract class ProviderAdapter {
       // bridge — the very crash class this stdin path exists to avoid. Swallow
       // it here; the child's own exit/close is handled by the caller.
       child.stdin.on('error', () => {});
-      // write + close in one call — also respects backpressure better than a
-      // bare write() followed by end().
-      child.stdin.end(stdinInput);
+      if (options.keepStdinOpen === true) {
+        // The adapter writes further messages and decides when to close.
+        child.stdin.write(stdinInput);
+      } else {
+        // write + close in one call — also respects backpressure better than
+        // a bare write() followed by end().
+        child.stdin.end(stdinInput);
+      }
     }
 
     return child;

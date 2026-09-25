@@ -670,6 +670,32 @@ When the server needs an AI response (triggered by a user message in the browser
 
 **`options`**: Provider-agnostic generation options. The bridge maps these to CLI-specific flags where supported.
 
+#### Additive option: `accepts_input` — a turn that takes messages while it runs
+
+```json
+"options": { "accepts_input": true }
+```
+
+Opt-in, per turn, Claude only. The turn keeps the CLI's input open for its whole life, so a message the person types while it runs can reach the assistant in the same process ([`turn_input`](#server--bridge-turn_input)) instead of waiting for the next turn. The bridge confirms it with `input_open: true` on the [`ai_request_ack`](#bridge--server-ai_request_ack); **without that confirmation nothing about the turn differs** from one that did not ask, and a server holds mid-turn messages as it always did. An older bridge ignores the option and never confirms, and so does this one for any other provider — which also makes leaving the option out the way back if the mode misbehaves.
+
+What changes for such a turn:
+
+- **The CLI reads its messages as NDJSON on stdin.** Spawned with `--input-format stream-json --replay-user-messages`; the opening `message` is written as the first frame, and stdin stays open. The frame, verified against Claude Code 2.1.280, is `{"type":"user","message":{"role":"user","content":"<text>"}}`. The CLI echoes each message back at the moment it takes it in, which is what [`user_input`](#user_input) is made from.
+- **The turn ends by a rule, not at the first `result`.** The bridge closes stdin — after which the CLI finishes, exits, and the bridge sends `done` — only when **all** of these hold:
+  1. the main assistant is idle (its message ended, or a `result` arrived);
+  2. **no task it or a helper started is still running**, whatever its `task_type` (`local_agent`, `local_bash`, anything else), as tracked from the task's `started` to its `finished` (or an `updated` to a status other than `running`/`pending`);
+  3. every accepted `turn_input` has been read (its `user_input` was sent).
+
+  In addition, when a background task of the main assistant ends, the CLI answers it in a turn of its own; the bridge waits for that turn to start (up to 10 s) before closing, so a message sent meanwhile is still delivered.
+
+  A `result` before that is **not** terminal. Captured on 2.1.280 with stdin open: a background shell command yields a `result` as soon as the reply ends (no `origin`), and a second one (`origin: task-notification`) when the CLI later answers the command's end; each mid-turn message adds one more. `done` carries the **last** result's fields with `usage` and `num_turns` **summed** across all of them (`cost_usd`, `duration_api_ms` and `subagent_stats` are already running totals in the CLI's own results, so they are taken from the last).
+- **Background tasks are on** for this turn: the bridge leaves `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` unset rather than applying its default of `"1"` (see [`bridge_env`](#additive-fields-bridge_env-and-bridge_prompt)). Every other turn keeps the default. A server's explicit `bridge_env` value still wins.
+- **The addendum says so.** It tells the model the process stays until everything it started is done, that messages can arrive meanwhile, that background tasks are available, that a failed or stopped task is reported with its output file and can be re-run, and that a background command must end. It still forbids detaching work with `&`, `nohup`, `disown` or `setsid`.
+- **The clocks are unchanged.** An accepted `turn_input` and every `main_state` count as activity for the silence bound. That bound (900 s by default) is also the backstop for a background command that never ends: the turn is stopped and reported as `silence_timeout_exceeded`, the next turn is told by the CLI, and the command's output file stays on disk.
+- **Stopping the turn stops what it started.** Every CLI is spawned as the leader of its own process group, and a `cancel` or a bound signals the group (SIGINT, then SIGTERM, then SIGKILL, as before). Claude Code runs each shell command in a session of its own, so on the last step the bridge also kills the groups of the CLI's descendants — found while they are still its descendants — because a SIGKILLed CLI cannot stop its own background commands. Accepted messages not yet read are dropped with the turn and named in `cancelled.pending_inputs`.
+
+It is still one process per turn: the process ends when the turn does. There is no long-lived process per conversation.
+
 #### Additive field: `working_dir`
 
 Where the CLI should be spawned. Optional; **absent means today's behaviour exactly** — a freshly made empty directory under `~/.cache/ai-bridge/`.
@@ -758,7 +784,7 @@ That is not a product decision any one server should have to rediscover. The bri
 
 | Key | Default | Why |
 |---|---|---|
-| `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` | `"1"` | Architectural. The capability cannot work under one-process-per-turn, so it is off for every consumer equally. Recompute this if the bridge ever gains a persistent-process mode — it would then be disabling something that works again. |
+| `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` | `"1"`, **unset on a turn with [`accepts_input`](#additive-option-accepts_input--a-turn-that-takes-messages-while-it-runs)** | Architectural. Background work cannot be collected by a turn whose input is closed, so it is off for every such turn equally — and it switches helpers to the foreground too (captured on 2.1.280). A turn with `accepts_input` stays until everything it started has ended, so there it is on. |
 | `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | `"1"` | Privacy. One machine user serves many projects, so notes written from one client's chat can surface in another's — a leak between tenants rather than a lost convenience. An operator who wants memory back says so with `bridge_env`. |
 | `CLAUDE_CODE_FORK_SUBAGENT` | *(none)* | Settable, not defaulted. The bridge has no architectural reason for it, and it changes cost and behaviour for every project that never asked. |
 
@@ -803,9 +829,12 @@ The bridge acknowledges receipt before starting the CLI process, echoing the ses
     "prompt_server_text": false,
     "env_overridden": [],
     "env_rejected": ["ANTHROPIC_BASE_URL"]
-  }
+  },
+  "input_open": true
 }
 ```
+
+**`input_open`**: Present, and `true`, only when the turn runs with its input open ([`accepts_input`](#additive-option-accepts_input--a-turn-that-takes-messages-while-it-runs)). Absent otherwise, and absent from every bridge that predates it: a server reads absence as "not open" and holds a mid-turn message until the turn is over.
 
 **`cli_session_id`**: The `cli_session_id` from the `ai_request` (the session being resumed, or `null` for a fresh start). Informational. The *resulting* session id — the one created or continued — is reported later on the `done` event.
 
@@ -848,6 +877,48 @@ The turn named by a `cancel` has stopped.
 **Sent after the turn's own events, not on receipt of the cancel.** The CLI is asked to stop rather than shot, so it commonly writes a little more on the way out; a server treats `cancelled` as terminal, so a reply that went out first would cut off the partial answer that stopping cleanly exists to keep.
 
 Sent only in response to a `cancel`. A turn ended by one of the bridge's own bounds reports a timeout on the `error` event and ends with `done`, like any other turn.
+
+On a turn with its input open it also carries **`pending_inputs`**: the `message_id` of every `turn_input` that was accepted and never read, oldest first — always present on such a turn, empty when nothing was pending. They are dropped with the turn; the server decides whether to offer them again.
+
+```json
+{ "type": "cancelled", "request_id": "req_abc123", "pending_inputs": ["msg_42"] }
+```
+
+### Server → Bridge: `turn_input`
+
+A message for a turn that is still running. Only meaningful for a turn whose ack said `input_open: true`.
+
+```json
+{
+  "type": "turn_input",
+  "request_id": "req_abc123",
+  "message_id": "msg_42",
+  "content": "Also check the staging config while you are at it."
+}
+```
+
+**`message_id`**: The server's id for the message. Echoed on the ack and on `user_input`.
+
+**`content`**: The text, as a string. Text only: files are fetched per turn, before the CLI starts.
+
+A frame without a string `request_id`, `message_id` and a non-empty string `content` is dropped with a warning and not answered.
+
+### Bridge → Server: `turn_input_ack`
+
+The answer to every `turn_input`, sent at once.
+
+```json
+{ "type": "turn_input_ack", "request_id": "req_abc123", "message_id": "msg_42", "status": "accepted" }
+{ "type": "turn_input_ack", "request_id": "req_abc123", "message_id": "msg_42", "status": "rejected", "reason": "turn_not_running" }
+```
+
+| `status` | `reason` | Meaning | What the server does |
+|---|---|---|---|
+| `accepted` | — | Written to the running CLI and queued there. The assistant reads it at its next step; [`user_input`](#user_input) says when. | Wait for `user_input`. |
+| `rejected` | `turn_not_running` | No turn to deliver it to: it ended, or is ending (the bridge has closed its input). | Start a normal new turn with it. |
+| `rejected` | `input_not_open` | The turn is running but cannot take it: it was not started with `accepts_input`, or its CLI has not started yet. | Hold it until the turn is over. |
+
+Nothing promises the assistant will change course. A message is read **after the step the assistant is in**: straight away when it is idle (for example while only background tasks run), otherwise when its current tool call returns — captured on 2.1.280, a message sent 15 s into a 40 s foreground command was read when the command finished, and then answered.
 
 ---
 
@@ -1260,6 +1331,32 @@ The life of a **helper** the CLI runs for the main assistant: a sub-agent, or a 
 
 Carried by the Claude adapter; Codex and Gemini never send it. A consumer that does not know the event ignores it.
 
+On a turn with its input open, the bridge counts tasks from `started` to `finished` to decide when the turn is over — see [`accepts_input`](#additive-option-accepts_input--a-turn-that-takes-messages-while-it-runs).
+
+#### `user_input`
+
+On a turn with its input open: the assistant has just taken in a message the bridge accepted as [`turn_input`](#server--bridge-turn_input).
+
+```json
+{ "type": "stream", "request_id": "req_abc123", "event": "user_input", "data": { "message_id": "msg_42" } }
+```
+
+Sent when the CLI echoes the message back (`--replay-user-messages`), which it does at the moment it dequeues it — so everything after this event is the assistant's response to it, or later. Messages are read in the order they were accepted. The opening message's echo is not reported.
+
+#### `main_state`
+
+On a turn with its input open: whether the **main** assistant (not a helper) is working or free.
+
+```json
+{ "type": "stream", "request_id": "req_abc123", "event": "main_state", "data": { "state": "idle" } }
+```
+
+- `working` — once at the start of the turn, right after the ack; again whenever the main assistant takes in a message (right after its `user_input`), starts a turn of the CLI's own (answering a finished background task), or writes again after having been idle.
+- `idle` — when the main assistant's message ends (`stop_reason` other than `tool_use`), or a `result` arrives.
+- Never sent twice in a row with the same state.
+
+A message sent while it is `idle` is read straight away; one sent while it is `working` is read after its current step. `idle` is not the end of the turn: background tasks may still be running, and the turn goes on until they end.
+
 #### `attachment`
 
 A file the assistant produced and chose to hand back. Emitted when the model calls the bridge-owned `bridge__attach_file` tool and the upload succeeded.
@@ -1331,6 +1428,7 @@ Everything beside `usage` is likewise provider-reported and optional. **Absent m
 | `num_turns` | How many assistant turns the CLI took internally to answer. |
 | `subtype` | How the CLI itself classified the end of the turn — `success`, `error_during_execution`, `error_max_turns`. Worth showing when a turn arrives with no text at all: `stop_reason` is null on several of those paths, so this is the only thing that says what happened. |
 | `permission_denials` | Tool calls the CLI's own permission system refused. In `isolated` this is the record of what the posture actually stopped — an empty answer with three denials reads very differently from an empty answer with none. |
+| `pending_inputs` | Turn with its input open only, and only when non-empty: accepted `turn_input` messages the assistant never read because the turn ended first (a timeout, a crash). A turn that ends normally has none, by the ending rule. |
 | `subagent_stats` | What the turn spent on helpers, in the CLI's own shape: `spawned`, `completed`, `failed`, `started_in_background`, `max_depth`, `by_type{}`, `killed{}`, `refused{}` and so on. Passed through unchanged. Tokens per helper come from the [`task`](#task) events. |
 
 `cli_session_id` is the CLI session this turn ran under — the id created on a fresh start, or the id resumed. The server persists it on the conversation so the next turn can resume. Absent/`null` when no session id was produced.
@@ -1655,6 +1753,9 @@ Treating the first `result` as terminal is what this replaces, and it was not a 
 | `stream` (block_stop) | Closing a content block |
 | `stream` (tool_result) | Acknowledging tool result received |
 | `stream` (task) | A helper started, progressed, is still alive, or ended |
+| `stream` (user_input) | The assistant took in a `turn_input` message |
+| `stream` (main_state) | The main assistant became working or idle (input-open turns) |
+| `turn_input_ack` | Answering a `turn_input`, accepted or rejected |
 | `stream` (done) | Response complete |
 | `stream` (error) | Error during streaming |
 | `tool_call` | CLI invoked a server-side tool (via callback) |
@@ -1670,6 +1771,7 @@ Treating the first `result` as terminal is what this replaces, and it was not a 
 | `pong` | After receiving `ping` |
 | `ai_request` | New AI request for a conversation |
 | `cancel` | Stop a turn that is running |
+| `turn_input` | A message for a turn that is still running |
 | `tool_resolve` | Returning tool execution result |
 | `tool_error` | Tool execution failed |
 | `local_call` | Asking the bridge to run one tool on this machine |
