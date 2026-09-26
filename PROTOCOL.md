@@ -676,6 +676,8 @@ When the server needs an AI response (triggered by a user message in the browser
 "options": { "accepts_input": true }
 ```
 
+A bridge that understands this says so in `hello` with **`"turn_input": true`**, so a server can tell before the first turn whether offering it is worth anything. That is the capability, not a promise about any turn: `input_open` on the ack still decides each one.
+
 Opt-in, per turn, Claude only. The turn keeps the CLI's input open for its whole life, so a message the person types while it runs can reach the assistant in the same process ([`turn_input`](#server--bridge-turn_input)) instead of waiting for the next turn. The bridge confirms it with `input_open: true` on the [`ai_request_ack`](#bridge--server-ai_request_ack); **without that confirmation nothing about the turn differs** from one that did not ask, and a server holds mid-turn messages as it always did. An older bridge ignores the option and never confirms, and so does this one for any other provider — which also makes leaving the option out the way back if the mode misbehaves.
 
 What changes for such a turn:

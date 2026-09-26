@@ -208,6 +208,13 @@ export interface HelloMessage {
   bridge_version: string;
   providers: ProviderCapability[];
   /**
+   * This bridge understands `options.accepts_input` and `turn_input`. Whether a
+   * given turn actually runs with its input open is still confirmed per turn,
+   * by `input_open` on its `ai_request_ack` (Claude only). Absent from a bridge
+   * that predates the feature; an older server ignores it.
+   */
+  turn_input?: true;
+  /**
    * Directories this bridge may be asked to work in. Absent or empty means
    * the operator allowed none, and every `ai_request.working_dir` is refused.
    * An older server ignores the field.

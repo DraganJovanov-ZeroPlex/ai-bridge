@@ -141,6 +141,12 @@ afterEach(async () => {
 });
 
 describe('accepts_input', () => {
+  it('is advertised in hello', async () => {
+    await startBridge([new InputAdapter('claude')]);
+
+    expect(frames.find((f) => f['type'] === 'hello')!['turn_input']).toBe(true);
+  });
+
   it('confirms it on the ack, and runs the turn with background tasks on and the matching addendum', async () => {
     const adapter = new InputAdapter('claude');
     await startBridge([adapter]);

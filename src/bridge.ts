@@ -1192,6 +1192,9 @@ export class Bridge extends EventEmitter<BridgeEvents> {
       version: PROTOCOL_VERSION,
       bridge_version: BRIDGE_VERSION,
       providers: availableProviders,
+      // Messages for a running turn are understood. Per turn, the ack's
+      // `input_open` is still what says a turn takes them.
+      turn_input: true,
       // Advertise the operator's allow-list so the server can offer a picker
       // rather than asking a developer to type an absolute path into a chat
       // box. Omitted entirely when empty: "no workspaces" and "this bridge
