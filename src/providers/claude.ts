@@ -1218,7 +1218,7 @@ function taskEventFrom(frame: Record<string, unknown>, started: Map<string, Star
     if (parent === undefined) return null;
     const match = [...started.entries()].find(([, task]) => task.toolUseId === parent);
     if (match === undefined) return null;
-    const [taskId] = match;
+    const [taskId, task] = match;
 
     const elapsed = numOf(frame, 'elapsed_time_seconds');
 
@@ -1226,6 +1226,7 @@ function taskEventFrom(frame: Record<string, unknown>, started: Map<string, Star
       phase: 'heartbeat',
       task_id: taskId,
       tool_use_id: parent,
+      ...(task.taskType !== undefined ? { task_type: task.taskType } : {}),
       ...(elapsed !== undefined ? { elapsed_seconds: elapsed } : {}),
     };
   }
@@ -1263,6 +1264,10 @@ function taskEventFrom(frame: Record<string, unknown>, started: Map<string, Star
 
   const data: TaskData = { phase, task_id: taskId };
   if (toolUseId !== undefined) data.tool_use_id = toolUseId;
+  // On every phase, not only `started`: the CLI names the kind only there, and
+  // a consumer that joins late, or keys a row off a `progress`, should not have
+  // to have kept the `started` to tell a helper from a shell command.
+  if (known.taskType !== undefined) data.task_type = known.taskType;
 
   const subagentType = strOf(frame, 'subagent_type');
   if (subagentType !== undefined) data.subagent_type = subagentType;
@@ -1270,7 +1275,6 @@ function taskEventFrom(frame: Record<string, unknown>, started: Map<string, Star
   if (description !== undefined) data.description = boundTaskText(description);
 
   if (phase === 'started') {
-    if (known.taskType !== undefined) data.task_type = known.taskType;
     const depth = numOf(frame, 'spawn_depth');
     if (depth !== undefined) data.spawn_depth = depth;
     if (typeof frame['is_backgrounded'] === 'boolean') data.is_backgrounded = frame['is_backgrounded'];

@@ -1226,9 +1226,9 @@ The life of a **helper** the CLI runs for the main assistant: a sub-agent, or a 
 
 `phase` is a string, one of:
 
-| Phase | When | Fields beside `task_id` and `tool_use_id` |
+| Phase | When | Fields beside `task_id`, `tool_use_id` and `task_type` |
 |---|---|---|
-| `started` | The helper was started. | `task_type`, `subagent_type`, `description`, `spawn_depth`, `is_backgrounded` |
+| `started` | The helper was started. | `subagent_type`, `description`, `spawn_depth`, `is_backgrounded` |
 | `progress` | The helper moved on to another step. | `description` (what it is doing now), `subagent_type`, `last_tool_name`, `usage` |
 | `heartbeat` | Every ~30 s while the main assistant is **blocked waiting** on the helper. | `elapsed_seconds` |
 | `updated` | The helper's state changed. | `status` |
@@ -1245,7 +1245,7 @@ The life of a **helper** the CLI runs for the main assistant: a sub-agent, or a 
   "usage": { "total_tokens": 24742, "tool_uses": 1, "duration_ms": 45887 } }
 ```
 
-- **`tool_use_id` is the key to group by.** It is the `tool_call_id` of the block that spawned the helper, and the `parent_tool_use_id` on the helper's own blocks. The CLI omits it on some phases; the bridge fills it in from the task's `started`. `task_id` is the CLI's own id and is present on every phase.
+- **`tool_use_id` is the key to group by.** It is the `tool_call_id` of the block that spawned the helper, and the `parent_tool_use_id` on the helper's own blocks. The CLI omits it on some phases; the bridge fills it in from the task's `started`. `task_id` is the CLI's own id and is present on every phase. `task_type` is repeated on every phase too, though the CLI names it only at `started`.
 - **Every task a consumer sees was introduced by a `started`** in the same turn. On a resumed session the CLI first reports on work an *earlier* turn left running; those reports are not forwarded, because they are not helpers of this turn.
 - **A helper is finished only when `finished` says so.** Not when its spawning call's `tool_result` arrives, and not when the main assistant's reply ends: a background helper's spawning call returns at once ("launched"), and the helper keeps working — and keeps sending `task` events and blocks — after the main assistant has written its whole answer. `done` still comes last.
 - **The end of the request ends every task.** `done`, a stream `error`, or `cancelled` for this `request_id` ends every task of that request, whatever phase it last reported. Most endings that cut a turn short send no `finished` at all — a stop, a silence or request timeout, a CLI that crashed, a `result` while a background shell was still running — so a consumer that waits for `finished` alone keeps a helper spinning forever after a stopped turn. Close them all on the terminal frame; show them as ended with the request, not as `completed`.

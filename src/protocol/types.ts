@@ -942,7 +942,11 @@ export interface TaskData {
    * the CLI omits it or words it differently there.
    */
   tool_use_id?: string;
-  /** What kind of task: `local_agent` for a helper, `local_bash` for a background shell command. Started only. */
+  /**
+   * What kind of task: `local_agent` for a helper, `local_bash` for a background
+   * shell command. On every phase when the CLI named it at `started` — the CLI
+   * names it only there, and the bridge repeats it.
+   */
   task_type?: string;
   /** The helper's kind, e.g. `Explore`, `general-purpose`. */
   subagent_type?: string;

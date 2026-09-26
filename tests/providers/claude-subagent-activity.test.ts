@@ -246,6 +246,9 @@ describe('the task event', () => {
     // CLI does not name the call the same way, and the bridge fills it in.
     expect(new Set(life.map((t) => t.tool_use_id))).toEqual(new Set([agent]));
     expect(new Set(life.map((t) => t.task_id)).size).toBe(1);
+    // The CLI names the kind only at `started`; the bridge repeats it, so a
+    // consumer can tell a helper from a shell command from any one event.
+    expect(life.map((t) => t.task_type)).toEqual(Array(life.length).fill('local_agent'));
 
     const [started, progress, beat1, beat2, updated, finished] = life;
     expect(started).toMatchObject({
@@ -310,8 +313,8 @@ describe('the task event', () => {
     const events = await replay({ fixture: BACKGROUND_TURN });
     const shell = tasks(events).filter((t) => t.phase === 'started' && t.task_type === 'local_bash');
     expect(shell).toHaveLength(1);
-    expect(tasks(events).filter((t) => t.task_id === shell[0]!.task_id).map((t) => t.phase))
-      .toEqual(['started', 'finished']);
+    expect(tasks(events).filter((t) => t.task_id === shell[0]!.task_id).map((t) => [t.phase, t.task_type]))
+      .toEqual([['started', 'local_bash'], ['finished', 'local_bash']]);
   });
 
   it('shows the bridge\'s default keeping a helper in the foreground', async () => {
@@ -389,7 +392,7 @@ describe('the task event', () => {
 
     expect(tasks(events)).toEqual([
       { phase: 'started', task_id: 't1', tool_use_id: 'toolu_agent', task_type: 'local_agent' },
-      { phase: 'heartbeat', task_id: 't1', tool_use_id: 'toolu_agent', elapsed_seconds: 60 },
+      { phase: 'heartbeat', task_id: 't1', tool_use_id: 'toolu_agent', task_type: 'local_agent', elapsed_seconds: 60 },
     ]);
   });
 
