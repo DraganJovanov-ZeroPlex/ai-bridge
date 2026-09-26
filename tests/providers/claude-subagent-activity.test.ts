@@ -331,6 +331,49 @@ describe('the task event', () => {
     expect(of(events, 'task')).toHaveLength(0);
   });
 
+  it('follows a task that started without naming its call to the end', async () => {
+    // The set of started tasks used to be the task_id → spawning-call map, so
+    // a `task_started` without a `tool_use_id` was forwarded and then every
+    // later phase was dropped as "never saw start": a consumer drew a helper
+    // that ran forever.
+    const events = await replay({
+      lines: [
+        { type: 'system', subtype: 'init', session_id: 's' },
+        { type: 'system', subtype: 'task_started', task_id: 't1', task_type: 'local_agent', description: 'Look around' },
+        { type: 'system', subtype: 'task_progress', task_id: 't1', last_tool_name: 'Read' },
+        { type: 'system', subtype: 'task_updated', task_id: 't1', patch: { status: 'completed' } },
+        { type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed', summary: 'done' },
+        { type: 'result', subtype: 'success', session_id: 's', usage: {} },
+      ],
+    });
+
+    expect(tasks(events).map((t) => t.phase)).toEqual(['started', 'progress', 'updated', 'finished']);
+    expect(tasks(events).every((t) => t.task_id === 't1' && t.tool_use_id === undefined)).toBe(true);
+    expect(tasks(events).at(-1)).toMatchObject({ status: 'completed', summary: 'done' });
+  });
+
+  it('learns the call from a later phase when the start did not name it', async () => {
+    // Once a phase names the call, the task is keyed by it — so a heartbeat
+    // for that call, and an `updated` that omits it, are attributed too.
+    const events = await replay({
+      lines: [
+        { type: 'system', subtype: 'init', session_id: 's' },
+        { type: 'system', subtype: 'task_started', task_id: 't1', task_type: 'local_agent' },
+        { type: 'system', subtype: 'task_progress', task_id: 't1', tool_use_id: 'toolu_agent' },
+        { type: 'tool_progress', tool_name: 'Agent', parent_tool_use_id: 'toolu_agent', elapsed_time_seconds: 30, heartbeat: true },
+        { type: 'system', subtype: 'task_updated', task_id: 't1', patch: { status: 'completed' } },
+        { type: 'result', subtype: 'success', session_id: 's', usage: {} },
+      ],
+    });
+
+    expect(tasks(events).map((t) => [t.phase, t.tool_use_id])).toEqual([
+      ['started', undefined],
+      ['progress', 'toolu_agent'],
+      ['heartbeat', 'toolu_agent'],
+      ['updated', 'toolu_agent'],
+    ]);
+  });
+
   it('ignores a heartbeat that is not a helper\'s, and progress that is not a heartbeat', async () => {
     const events = await replay({
       lines: [

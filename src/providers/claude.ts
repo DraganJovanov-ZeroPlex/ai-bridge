@@ -330,11 +330,13 @@ export class ClaudeAdapter extends ProviderAdapter {
       // as whole `assistant` frames and are mapped below.
       const mapper = new ClaudePartialStreamMapper();
 
-      // task_id → the tool call that spawned it. `task_updated` does not name
-      // the call, and a consumer groups a helper's events by it, so the bridge
-      // fills it in from the task's own `task_started`. Doubles as the set of
-      // calls a heartbeat may be attributed to.
-      const spawnedBy = new Map<string, string>();
+      // Every task this turn saw start, and what its `task_started` said.
+      // `task_updated` does not name the spawning call, and a consumer groups a
+      // helper's events by it, so the bridge fills it in from here; it is also
+      // the set of calls a heartbeat may be attributed to. Keyed by task_id,
+      // NOT by the call: a task that started without naming its call is still
+      // a task this turn started, and its later phases must still get through.
+      const startedTasks = new Map<string, StartedTask>();
 
       // Whole-message blocks that arrived while a partial block was still open.
       //
@@ -494,7 +496,7 @@ export class ClaudeAdapter extends ProviderAdapter {
         // helper busy in one long step from getting the turn stopped as
         // silent: its heartbeat is the only thing the CLI says meanwhile.
         if (type === 'system' || type === 'tool_progress') {
-          const task = taskEventFrom(parsed, spawnedBy);
+          const task = taskEventFrom(parsed, startedTasks);
           if (task !== null) {
             if (settled) {
               droppedAfterSettle++;
@@ -1161,6 +1163,14 @@ function usageOf(value: unknown): TaskUsage | undefined {
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
+/** What a turn remembers about a task from its `task_started`. */
+interface StartedTask {
+  /** The spawning call, when the CLI named it (at start, or on a later phase). */
+  toolUseId: string | undefined;
+  /** `local_agent`, `local_bash`… — named by the CLI only at start. */
+  taskType: string | undefined;
+}
+
 /** The CLI's `system` subtypes for a task's life, and the phase each becomes. */
 const TASK_PHASES: ReadonlyMap<string, TaskPhase> = new Map<string, TaskPhase>([
   ['task_started', 'started'],
@@ -1191,10 +1201,11 @@ const TASK_PHASES: ReadonlyMap<string, TaskPhase> = new Map<string, TaskPhase>([
  * rather than trimmed, so carrying it would risk losing the event entirely) and
  * `output_file` (a path on this machine, which means nothing to a server).
  *
- * @param spawnedBy task_id → spawning tool call, filled in here from
- *                  `task_started` and read back for the frames that omit it
+ * @param started every task seen to start in this turn, keyed by task_id —
+ *                filled in here from `task_started`, and read back for the
+ *                frames that omit the spawning call or the task's kind
  */
-function taskEventFrom(frame: Record<string, unknown>, spawnedBy: Map<string, string>): TaskData | null {
+function taskEventFrom(frame: Record<string, unknown>, started: Map<string, StartedTask>): TaskData | null {
   if (frame['type'] === 'tool_progress') {
     // A heartbeat is keyed by the call it is waiting on, which for a helper is
     // the `Agent` call that spawned it. Only those of a task this process saw
@@ -1204,8 +1215,9 @@ function taskEventFrom(frame: Record<string, unknown>, spawnedBy: Map<string, st
     if (frame['heartbeat'] !== true) return null;
     const parent = strOf(frame, 'parent_tool_use_id');
     if (parent === undefined) return null;
-    const taskId = [...spawnedBy.entries()].find(([, spawning]) => spawning === parent)?.[0];
-    if (taskId === undefined) return null;
+    const match = [...started.entries()].find(([, task]) => task.toolUseId === parent);
+    if (match === undefined) return null;
+    const [taskId] = match;
 
     const elapsed = numOf(frame, 'elapsed_time_seconds');
 
@@ -1224,10 +1236,20 @@ function taskEventFrom(frame: Record<string, unknown>, spawnedBy: Map<string, st
   if (taskId === undefined) return null;
   let toolUseId = strOf(frame, 'tool_use_id');
 
+  let known = started.get(taskId);
   if (phase === 'started') {
-    if (toolUseId !== undefined) spawnedBy.set(taskId, toolUseId);
-  } else if (spawnedBy.has(taskId)) {
-    toolUseId = toolUseId ?? spawnedBy.get(taskId);
+    // Recorded whether or not the CLI named the spawning call. Recording only
+    // the ones that did made a task started without a `tool_use_id` look, to
+    // every later phase, like one this process never saw start: `started` got
+    // through and its `progress` and `finished` were dropped, so a consumer
+    // drew a helper that ran forever.
+    known = { toolUseId, taskType: strOf(frame, 'task_type') };
+    started.set(taskId, known);
+  } else if (known !== undefined) {
+    // A later phase that names the call teaches it to a task that started
+    // without one, so its heartbeats and `updated` can be keyed from then on.
+    if (known.toolUseId === undefined && toolUseId !== undefined) known.toolUseId = toolUseId;
+    toolUseId = toolUseId ?? known.toolUseId;
   } else {
     // A task this process never saw start. The real case is the CLI's own
     // queued work: on --resume it first reports that a background command an
@@ -1247,8 +1269,7 @@ function taskEventFrom(frame: Record<string, unknown>, spawnedBy: Map<string, st
   if (description !== undefined) data.description = boundTaskText(description);
 
   if (phase === 'started') {
-    const taskType = strOf(frame, 'task_type');
-    if (taskType !== undefined) data.task_type = taskType;
+    if (known.taskType !== undefined) data.task_type = known.taskType;
     const depth = numOf(frame, 'spawn_depth');
     if (depth !== undefined) data.spawn_depth = depth;
     if (typeof frame['is_backgrounded'] === 'boolean') data.is_backgrounded = frame['is_backgrounded'];
