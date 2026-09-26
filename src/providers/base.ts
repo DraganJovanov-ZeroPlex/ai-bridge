@@ -180,10 +180,19 @@ export function createFinalizer(opts: {
    * empty `done`.
    */
   settleFromExit?: (exitCode: number | null) => boolean;
+  /**
+   * The `done` data for a turn ended by a bound, a cancel or a crash, which
+   * otherwise carries `{}`. For an adapter that has already been told what the
+   * turn spent — an input-open turn has results in hand long before its
+   * process ends — so a stopped turn still reports its usage.
+   */
+  doneDataOnStop?: () => Record<string, unknown>;
 }): { onRlClose: () => void; onChildClose: (code: number | null) => void } {
   let rlClosed = false;
   let childExitCode: number | null = null;
   let childExited = false;
+
+  const stopData = (): Record<string, unknown> => opts.doneDataOnStop?.() ?? {};
 
   const tryFinalize = () => {
     if (!rlClosed || !childExited) return;
@@ -217,7 +226,7 @@ export function createFinalizer(opts: {
           limit_seconds: timedOut.limitSeconds,
         },
       });
-      opts.onEvent({ event: 'done', data: {} });
+      opts.onEvent({ event: 'done', data: stopData() });
     } else if (aborted) {
       // AHEAD OF `recoverTerminal` ON PURPOSE, and not only for tidiness. A
       // cancel that lands when the only result so far belonged to the CLI's own
@@ -233,7 +242,7 @@ export function createFinalizer(opts: {
       // "claude CLI exited with code 143" alongside the answer it had written.
       // A person who pressed stop then sees an error they caused and cannot
       // act on. What the turn produced has already been sent; this ends it.
-      opts.onEvent({ event: 'done', data: {} });
+      opts.onEvent({ event: 'done', data: stopData() });
     } else if (opts.settleFromExit?.(childExitCode) === true) {
       // Settled from the CLI's own report; see settleFromExit.
     } else if (childExitCode !== 0 && childExitCode !== null) {
@@ -244,7 +253,7 @@ export function createFinalizer(opts: {
           message: formatStderrMessage(opts.providerName, opts.getStderr(), childExitCode),
         },
       });
-      opts.onEvent({ event: 'done', data: {} });
+      opts.onEvent({ event: 'done', data: stopData() });
     } else if (opts.recoverTerminal?.() !== true) {
       // Clean exit but no terminal event — emit a non-fatal error.
       opts.onEvent({

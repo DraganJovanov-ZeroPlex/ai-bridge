@@ -151,6 +151,8 @@ export async function runInputTurn(opts: {
   withPort?: boolean;
   /** The session the turn resumes; null (the default) for a fresh one. */
   cliSessionId?: string | null;
+  /** The silence bound; 0 (the default) for none. */
+  silenceTimeoutSeconds?: number;
 }): Promise<InputTurn> {
   const scratch = mkdtempSync(join(tmpdir(), 'input-turn-'));
   const stepsPath = join(scratch, 'steps.json');
@@ -209,7 +211,7 @@ export async function runInputTurn(opts: {
       workingDir: process.cwd(),
       signal: opts.signal ?? new AbortController().signal,
       requestTimeoutSeconds: 60,
-      silenceTimeoutSeconds: 0,
+      silenceTimeoutSeconds: opts.silenceTimeoutSeconds ?? 0,
       cliSessionId: opts.cliSessionId ?? null,
       attachmentDir: null,
       bridgeEnv: {},

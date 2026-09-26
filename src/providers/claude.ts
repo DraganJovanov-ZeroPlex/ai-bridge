@@ -628,6 +628,11 @@ export class ClaudeAdapter extends ProviderAdapter {
         // unexplained non-zero exit — the CLI died while the turn was still
         // open, on a result that said all was well — is left to the finalizer
         // to report as the crash it is.
+        // A stopped or crashed input turn still says what it spent: its
+        // results arrived long before the process ended.
+        doneDataOnStop: acceptsInput
+          ? () => (results.length > 0 ? doneDataFrom(combineResults(results), model, providerVersion) : {})
+          : undefined,
         settleFromExit: acceptsInput
           ? (exitCode) => {
             if (results.length === 0) return false;

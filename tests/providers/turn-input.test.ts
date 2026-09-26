@@ -381,6 +381,8 @@ describe('messages for a running turn', () => {
 
     expect(of(turn.events, 'error')[0].data).toMatchObject({ code: 'provider_error' });
     expect(turn.events.at(-1)!.event).toBe('done');
+    // Reported as a crash, but with what it had spent.
+    expect((of(turn.events, 'done')[0].data as DoneData).num_turns).toBe(1);
   });
 });
 
@@ -505,8 +507,27 @@ describe('the port', () => {
 
     expect(turn.port.pending()).toEqual(['p1']);
     expect(turn.port.offer('p2', 'hello?')).toEqual({ status: 'rejected', reason: 'turn_ending' });
-    // A stopped turn ends with a bare done, not an error.
+    // A stopped turn ends with a done, not an error — and the done still
+    // says what the turn spent before it was stopped.
     expect(of(turn.events, 'error')).toHaveLength(0);
     expect(turn.events[turn.events.length - 1].event).toBe('done');
+    expect((of(turn.events, 'done')[0].data as DoneData).usage).toEqual({
+      input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4,
+    });
+  });
+
+  it('keeps what the turn spent when a bound stops it', async () => {
+    const turn = await runInputTurn({
+      message: 'go',
+      silenceTimeoutSeconds: 1,
+      steps: [echo('go'), init, taskStarted('t1', 'local_bash', true), text('started'), result(), { sleep: 5000 }],
+    });
+
+    expect(of(turn.events, 'error')[0].data).toMatchObject({ code: 'silence_timeout_exceeded' });
+    const data = of(turn.events, 'done')[0].data as DoneData;
+    expect(data.usage).toEqual({
+      input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4,
+    });
+    expect(data.num_turns).toBe(1);
   });
 });
