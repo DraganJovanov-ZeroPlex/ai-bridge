@@ -1024,23 +1024,6 @@ export class Bridge extends EventEmitter<BridgeEvents> {
   }
 
   /**
-   * Stop a turn because the server asked.
-   *
-   * The same mechanism a bound uses -- abort the request, which ends the CLI's
-   * turn and lets the adapter finalize whatever it had -- so a cancelled turn
-   * and a timed-out one leave the session in the same resumable state.
-   *
-   * An id that is not running is not an error. A cancel racing the answer it
-   * was meant to stop is the ordinary case, and answering it would tell the
-   * server about a turn that has already been reported.
-   *
-   * The `cancelled` reply waits for the turn to finish unwinding rather than
-   * going out on receipt: the CLI is asked to stop, not shot, so it usually
-   * writes a little more before it goes, and the server treats `cancelled` as
-   * terminal. Answering immediately would throw away the tail of the very
-   * partial answer that stopping cleanly exists to keep.
-   */
-  /**
    * A message for a turn that is still running.
    *
    * Answered at once, always: `accepted` when it was written to the running
@@ -1098,6 +1081,23 @@ export class Bridge extends EventEmitter<BridgeEvents> {
       && !this.testMode;
   }
 
+  /**
+   * Stop a turn because the server asked.
+   *
+   * The same mechanism a bound uses -- abort the request, which ends the CLI's
+   * turn and lets the adapter finalize whatever it had -- so a cancelled turn
+   * and a timed-out one leave the session in the same resumable state.
+   *
+   * An id that is not running is not an error. A cancel racing the answer it
+   * was meant to stop is the ordinary case, and answering it would tell the
+   * server about a turn that has already been reported.
+   *
+   * The `cancelled` reply waits for the turn to finish unwinding rather than
+   * going out on receipt: the CLI is asked to stop, not shot, so it usually
+   * writes a little more before it goes, and the server treats `cancelled` as
+   * terminal. Answering immediately would throw away the tail of the very
+   * partial answer that stopping cleanly exists to keep.
+   */
   private cancelRequest(requestId: string): void {
     const controller = this.activeRequests.get(requestId);
     if (!controller) {
