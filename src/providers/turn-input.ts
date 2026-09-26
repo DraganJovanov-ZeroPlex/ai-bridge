@@ -56,7 +56,11 @@ export class TurnInputPort {
     this.onAccept = onAccept;
   }
 
-  /** stdin is closed or the turn is over: nothing more can be delivered. */
+  /**
+   * stdin is closed or the turn is being stopped: nothing more can be
+   * delivered. Further offers are answered `turn_ending`; once the bridge has
+   * forgotten the turn it answers `turn_not_running` itself.
+   */
   end(): void {
     this.ended = true;
     this.writer = null;
@@ -73,7 +77,11 @@ export class TurnInputPort {
 
   /** Deliver a message to the running CLI, or say why not. */
   offer(messageId: string, content: string): TurnInputOutcome {
-    if (this.ended) return { status: 'rejected', reason: 'turn_not_running' };
+    // Ended while the bridge still counts the turn as running: stdin is closed
+    // or the turn is being stopped, and the CLI may still be alive. Not
+    // `turn_not_running`, which tells the server it may start a new turn —
+    // that would resume the session while this CLI still writes to it.
+    if (this.ended) return { status: 'rejected', reason: 'turn_ending' };
     if (this.writer === null) return { status: 'rejected', reason: 'input_not_open' };
 
     this.writer(userMessageFrame(content));

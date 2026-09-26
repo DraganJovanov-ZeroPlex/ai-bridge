@@ -323,7 +323,7 @@ describe('messages for a running turn', () => {
 });
 
 describe('the port', () => {
-  it('rejects before the CLI is running, and after the turn is over', () => {
+  it('rejects before the CLI is running, and as ending once it has been ended', () => {
     const port = new TurnInputPort();
     expect(port.offer('a', 'hi')).toEqual({ status: 'rejected', reason: 'input_not_open' });
 
@@ -332,8 +332,11 @@ describe('the port', () => {
     expect(port.offer('b', 'hi')).toEqual({ status: 'accepted' });
     expect(written).toEqual([userMessageFrame('hi')]);
 
+    // Ended by the adapter while the bridge still counts the turn as running:
+    // the CLI may be alive, so the server must hold, not start a new turn.
+    // (Once the bridge forgets the turn it answers turn_not_running itself.)
     port.end();
-    expect(port.offer('c', 'hi')).toEqual({ status: 'rejected', reason: 'turn_not_running' });
+    expect(port.offer('c', 'hi')).toEqual({ status: 'rejected', reason: 'turn_ending' });
     // What was accepted and not read survives the end, for the terminal frame.
     expect(port.pending()).toEqual(['b']);
   });
@@ -353,7 +356,9 @@ describe('the port', () => {
       },
     });
 
-    expect(outcomes).toEqual([{ status: 'rejected', reason: 'turn_not_running' }]);
+    // Ending, not over: the CLI is still finishing, and a new turn started
+    // now would resume the session while it still writes to it.
+    expect(outcomes).toEqual([{ status: 'rejected', reason: 'turn_ending' }]);
   });
 
   it('drops pending messages when the turn is stopped, and keeps them for the report', async () => {
@@ -371,7 +376,7 @@ describe('the port', () => {
     });
 
     expect(turn.port.pending()).toEqual(['p1']);
-    expect(turn.port.offer('p2', 'hello?')).toEqual({ status: 'rejected', reason: 'turn_not_running' });
+    expect(turn.port.offer('p2', 'hello?')).toEqual({ status: 'rejected', reason: 'turn_ending' });
     // A stopped turn ends with a bare done, not an error.
     expect(of(turn.events, 'error')).toHaveLength(0);
     expect(turn.events[turn.events.length - 1].event).toBe('done');

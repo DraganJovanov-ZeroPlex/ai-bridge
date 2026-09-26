@@ -641,7 +641,7 @@ export interface TurnInputMessage {
 }
 
 /** Why a `turn_input` was not taken. */
-export type TurnInputRejection = 'turn_not_running' | 'input_not_open';
+export type TurnInputRejection = 'turn_not_running' | 'turn_ending' | 'input_not_open';
 
 /**
  * The bridge's answer to a `turn_input` (bridge → server).
@@ -649,11 +649,19 @@ export type TurnInputRejection = 'turn_not_running' | 'input_not_open';
  * `accepted`: the message was written to the running CLI and is queued there.
  * The assistant reads it at its next step; `user_input` says when.
  *
- * `rejected`: nothing was written. `turn_not_running` means there is no turn
- * any more to deliver it to (it ended, or is ending), so the server starts a
- * normal new turn with it. `input_not_open` means the turn is running but
- * cannot take it (it was not started with `accepts_input`, or the CLI has not
- * started yet), so the server holds it until the turn is over.
+ * `rejected`: nothing was written.
+ *  - `turn_ending`: the turn is still running but will take nothing more —
+ *    the bridge closed its input, or it is being stopped (a cancel, a bound, a
+ *    dropped connection). Its CLI may still be alive and writing to the
+ *    session, so the server holds the message until this request's terminal
+ *    frame and only then starts a new turn with it. Starting one sooner would
+ *    run a second `--resume` of the session while the first still writes it.
+ *  - `turn_not_running`: no turn by that id is running — it never existed, or
+ *    it has ended and its terminal frame went out ahead of this ack. The
+ *    server starts a normal new turn with it.
+ *  - `input_not_open`: the turn is running but cannot take it (it was not
+ *    started with `accepts_input`, or the CLI has not started yet), so the
+ *    server holds it until the turn is over.
  */
 export interface TurnInputAckMessage {
   type: 'turn_input_ack';

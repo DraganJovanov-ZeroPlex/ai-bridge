@@ -1046,8 +1046,10 @@ export class Bridge extends EventEmitter<BridgeEvents> {
    * Answered at once, always: `accepted` when it was written to the running
    * CLI, `rejected` with the reason otherwise, so the server never has to
    * guess whether a message reached the assistant. The server acts on the
-   * reason: `turn_not_running` starts a new turn with it, `input_not_open`
-   * holds it until this one is over.
+   * reason: `turn_not_running` starts a new turn with it; `turn_ending` and
+   * `input_not_open` hold it until this request's terminal frame. The line
+   * between the first two is whether this request's CLI can still be alive:
+   * a server told `turn_not_running` resumes the session straight away.
    *
    * A frame without a usable request_id, message_id or text is dropped with a
    * warning rather than answered: there is no message to account for, and a
@@ -1066,8 +1068,11 @@ export class Bridge extends EventEmitter<BridgeEvents> {
     }
 
     const port = this.turnInputs.get(requestId);
+    // A turn a dropped connection aborted is no longer "active", but its CLI
+    // may still be stopping (see replayDisconnectedTurn): ending, not over.
+    const stillStopping = this.disconnectedTurns.some((t) => t.requestId === requestId && !t.ended);
     const outcome = !this.activeRequests.has(requestId)
-      ? { status: 'rejected' as const, reason: 'turn_not_running' as const }
+      ? { status: 'rejected' as const, reason: stillStopping ? 'turn_ending' as const : 'turn_not_running' as const }
       : port === undefined
         ? { status: 'rejected' as const, reason: 'input_not_open' as const }
         : port.offer(messageId, content);

@@ -917,8 +917,11 @@ The answer to every `turn_input`, sent at once.
 | `status` | `reason` | Meaning | What the server does |
 |---|---|---|---|
 | `accepted` | — | Written to the running CLI and queued there. The assistant reads it at its next step; [`user_input`](#user_input) says when. | Wait for `user_input`. |
-| `rejected` | `turn_not_running` | No turn to deliver it to: it ended, or is ending (the bridge has closed its input). | Start a normal new turn with it. |
+| `rejected` | `turn_ending` | The turn is still running but takes nothing more: the bridge has closed its input (the turn is finishing), or it is being stopped — a `cancel`, a bound, a dropped connection; stopping can take up to ~10 s. **Its CLI may still be alive and writing to the session.** | **Hold it until this request's terminal frame** — `done`, `cancelled`, or the `error` `bridge_disconnected` replayed after a reconnect — **then** start a new turn with it. Never sooner: a new turn resumes the same session, and there is no lock on it, so two CLIs would write to it at once. |
+| `rejected` | `turn_not_running` | No turn by that id is running: it never existed, or it has ended and its terminal frame went out ahead of this ack. | Start a normal new turn with it. |
 | `rejected` | `input_not_open` | The turn is running but cannot take it: it was not started with `accepts_input`, or its CLI has not started yet. | Hold it until the turn is over. |
+
+A `reason` the server does not know is to be treated like `turn_ending`: hold the message until the request's terminal frame. Holding is always safe; starting a turn early is not.
 
 Nothing promises the assistant will change course. A message is read **after the step the assistant is in**: straight away when it is idle (for example while only background tasks run), otherwise when its current tool call returns — captured on 2.1.280, a message sent 15 s into a 40 s foreground command was read when the command finished, and then answered.
 

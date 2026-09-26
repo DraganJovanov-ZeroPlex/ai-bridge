@@ -232,6 +232,29 @@ describe('turn_input', () => {
     expect(await ackFor('req_in', 'm1')).toMatchObject({ status: 'rejected', reason: 'turn_not_running' });
   });
 
+  it('rejects with turn_ending while a stopped turn is still stopping, then turn_not_running once it is over', async () => {
+    const adapter = new SlowStopAdapter('claude');
+    await startBridge([adapter]);
+    request('req_in', { accepts_input: true });
+    await waitFor((f) => f['event'] === 'block_start', 'the turn starting');
+
+    socket.send(JSON.stringify({ type: 'cancel', request_id: 'req_in' }));
+    await new Promise((r) => setTimeout(r, 50));
+    // The CLI is still stopping: a new turn now would resume the session
+    // while it still writes to it. Hold until `cancelled`.
+    socket.send(JSON.stringify({ type: 'turn_input', request_id: 'req_in', message_id: 'm1', content: 'hi' }));
+    expect(await ackFor('req_in', 'm1')).toMatchObject({ status: 'rejected', reason: 'turn_ending' });
+    expect(frames.some((f) => f['type'] === 'cancelled')).toBe(false);
+
+    adapter.finish();
+    await waitFor((f) => f['type'] === 'cancelled', 'cancelled');
+    socket.send(JSON.stringify({ type: 'turn_input', request_id: 'req_in', message_id: 'm2', content: 'hi' }));
+    expect(await ackFor('req_in', 'm2')).toMatchObject({ status: 'rejected', reason: 'turn_not_running' });
+    // The terminal frame went out ahead of the turn_not_running.
+    expect(frames.findIndex((f) => f['type'] === 'cancelled'))
+      .toBeLessThan(frames.findIndex((f) => f['type'] === 'turn_input_ack' && f['message_id'] === 'm2'));
+  });
+
   it('names the accepted messages a stopped turn never read', async () => {
     const adapter = new InputAdapter('claude');
     await startBridge([adapter]);
@@ -321,6 +344,11 @@ describe('a disconnect', () => {
     // The server is back, but the turn is still stopping: its CLI may yet read
     // a queued message, so nothing is reported until it has ended.
     expect(frames.some((f) => f['type'] === 'error' && f['request_id'] === 'req_in')).toBe(false);
+
+    // Meanwhile a message for it is held, not started as a new turn: the
+    // old CLI is still alive.
+    socket.send(JSON.stringify({ type: 'turn_input', request_id: 'req_in', message_id: 'm3', content: 'three' }));
+    expect(await ackFor('req_in', 'm3')).toMatchObject({ status: 'rejected', reason: 'turn_ending' });
 
     // It reads m1 on its way out, then is gone.
     expect(adapter.port!.shiftRead()).toBe('m1');
