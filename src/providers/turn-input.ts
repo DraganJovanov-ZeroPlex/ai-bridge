@@ -42,6 +42,12 @@ export class TurnInputPort {
   private ended = false;
   /** Accepted and not yet read by the assistant, oldest first. */
   private readonly fifo: Array<{ messageId: string; content: string }> = [];
+  /**
+   * Every message_id this turn accepted. A server that did not hear an ack in
+   * time sends the same message again; writing it twice would have the
+   * assistant read it twice.
+   */
+  private readonly accepted = new Set<string>();
 
   /**
    * The adapter's CLI is running with stdin open: start taking messages.
@@ -75,8 +81,17 @@ export class TurnInputPort {
     return this.ended;
   }
 
-  /** Deliver a message to the running CLI, or say why not. */
+  /**
+   * Deliver a message to the running CLI, or say why not.
+   *
+   * Idempotent per message_id: a message already accepted is answered
+   * `accepted` again and NOT written again — whatever has happened since,
+   * since it was delivered either way (read, or pending and reported with the
+   * turn's end). Only acceptance is remembered: a rejected message was never
+   * written, so a retry of it is judged afresh.
+   */
   offer(messageId: string, content: string): TurnInputOutcome {
+    if (this.accepted.has(messageId)) return { status: 'accepted' };
     // Ended while the bridge still counts the turn as running: stdin is closed
     // or the turn is being stopped, and the CLI may still be alive. Not
     // `turn_not_running`, which tells the server it may start a new turn —
@@ -85,6 +100,7 @@ export class TurnInputPort {
     if (this.writer === null) return { status: 'rejected', reason: 'input_not_open' };
 
     this.writer(userMessageFrame(content));
+    this.accepted.add(messageId);
     this.fifo.push({ messageId, content });
     this.onAccept?.();
 

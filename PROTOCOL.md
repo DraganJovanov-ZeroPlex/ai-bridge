@@ -899,7 +899,7 @@ A message for a turn that is still running. Only meaningful for a turn whose ack
 }
 ```
 
-**`message_id`**: The server's id for the message. Echoed on the ack and on `user_input`.
+**`message_id`**: The server's id for the message. Echoed on the ack and on `user_input`. **Idempotent within the turn:** a `turn_input` repeating a `message_id` the turn already accepted — a retry after a lost or late ack — is answered `accepted` again and not delivered again. A rejected one was never delivered, so its retry is judged afresh.
 
 **`content`**: The text, as a string. Text only: files are fetched per turn, before the CLI starts.
 

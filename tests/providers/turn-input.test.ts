@@ -341,6 +341,30 @@ describe('the port', () => {
     expect(port.pending()).toEqual(['b']);
   });
 
+  it('writes a message once, however often it is offered, and answers every retry as the first', () => {
+    // An ack-timeout retry sends the same message_id again. Writing it twice
+    // would have the assistant read it twice.
+    const port = new TurnInputPort();
+    expect(port.offer('m1', 'early')).toEqual({ status: 'rejected', reason: 'input_not_open' });
+    const written: string[] = [];
+    port.open((frame) => written.push(frame), () => {});
+
+    // A rejection is not remembered: nothing was written, so it is judged afresh.
+    expect(port.offer('m1', 'early')).toEqual({ status: 'accepted' });
+    expect(port.offer('m1', 'early')).toEqual({ status: 'accepted' });
+    expect(written).toEqual([userMessageFrame('early')]);
+    expect(port.pending()).toEqual(['m1']);
+
+    // Read, and then retried: still the first answer, still not written again.
+    expect(port.shiftRead()).toBe('m1');
+    expect(port.offer('m1', 'early')).toEqual({ status: 'accepted' });
+    // Even after the turn has ended: it WAS delivered.
+    port.end();
+    expect(port.offer('m1', 'early')).toEqual({ status: 'accepted' });
+    expect(written).toHaveLength(1);
+    expect(port.pending()).toEqual([]);
+  });
+
   it('rejects once the adapter closed stdin, even while the CLI is still finishing', async () => {
     const outcomes: Array<{ status: string; reason?: string }> = [];
     let closedAt = -1;
