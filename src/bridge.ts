@@ -176,6 +176,17 @@ const TOOL_RESOLVE_TIMEOUT_MAX_S = 3600;
 
 // Large-but-finite cap (~24 min of retries with backoff); infinite retry could
 // mask configuration errors.
+/** A request a WebSocket disconnect aborted, waiting to be reported as over. */
+interface DisconnectedTurn {
+  requestId: string;
+  /** Its input port, on a turn that kept its input open. */
+  turnInput: TurnInputPort | null;
+  /** The turn has finished running (its CLI is gone). */
+  ended: boolean;
+  /** The server is back and waiting to hear about it. */
+  due: boolean;
+}
+
 const MAX_RECONNECT_ATTEMPTS = 100;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 15_000; // Cap at 15s per PROTOCOL.md
@@ -398,12 +409,12 @@ export class Bridge extends EventEmitter<BridgeEvents> {
    */
   private readonly turnInputs = new Map<string, TurnInputPort>();
   /**
-   * Request IDs aborted because the WebSocket dropped while they were in
-   * flight. No terminal event could be sent over the closed socket, so on the
-   * next welcome these are replayed as terminal errors to release the
-   * browser's loading state.
+   * Requests aborted because the WebSocket dropped while they were in flight.
+   * No terminal event could be sent over the closed socket, so on the next
+   * welcome these are replayed as terminal errors to release the browser's
+   * loading state. See replayDisconnectedTurn().
    */
-  private abortedRequestIds: string[] = [];
+  private disconnectedTurns: DisconnectedTurn[] = [];
   /** Monotonic counter for synthesizing tool_call_ids for MCP-originated calls. */
   private mcpToolCallSeq = 0;
 
@@ -1120,8 +1131,9 @@ export class Bridge extends EventEmitter<BridgeEvents> {
       for (const [id, controller] of this.activeRequests) {
         controller.abort();
         // Record the aborted request so it can be replayed as a
-        // terminal error after reconnect.
-        this.abortedRequestIds.push(id);
+        // terminal error after reconnect — with its input port, if it had
+        // one, so the replay can say which accepted messages were never read.
+        this.disconnectedTurns.push({ requestId: id, turnInput: this.turnInputs.get(id) ?? null, ended: false, due: false });
         log.debug('Aborted active request on disconnect', { requestId: id });
       }
       this.activeRequests.clear();
@@ -1491,20 +1503,36 @@ export class Bridge extends EventEmitter<BridgeEvents> {
     // Replay any requests aborted by a previous disconnect as terminal errors
     // now that the connection is back, so the browser exits its loading state
     // instead of waiting for the server's own timeout.
-    if (this.abortedRequestIds.length > 0) {
-      const replayed = this.abortedRequestIds;
-      this.abortedRequestIds = [];
-      for (const requestId of replayed) {
-        log.info('Replaying aborted request as a terminal error', { requestId });
-        this.send({
-          type: 'error',
-          request_id: requestId,
-          code: 'bridge_disconnected',
-          message: 'Request aborted: the bridge connection dropped while the response was streaming.',
-          fatal: false,
-        });
-      }
+    for (const turn of [...this.disconnectedTurns]) {
+      turn.due = true;
+      // An input turn is replayed once it has ENDED, not before: its CLI may
+      // still read a queued message on its way out, and the replay's
+      // `pending_inputs` has to be the final word on which ones it did not.
+      if (turn.turnInput === null || turn.ended) this.replayDisconnectedTurn(turn);
     }
+  }
+
+  /**
+   * Tell the server a request aborted by a disconnect is over.
+   *
+   * On a turn with its input open, `pending_inputs` names every accepted
+   * `turn_input` the assistant never read. A message accepted and read while
+   * the socket was down has no `user_input` the server ever saw; without this
+   * list it could neither resend (the assistant would read it twice) nor not
+   * resend (it might be lost). With it the accounting is exact: accepted and
+   * not listed means read.
+   */
+  private replayDisconnectedTurn(turn: DisconnectedTurn): void {
+    this.disconnectedTurns = this.disconnectedTurns.filter((t) => t !== turn);
+    log.info('Replaying aborted request as a terminal error', { requestId: turn.requestId });
+    this.send({
+      type: 'error',
+      request_id: turn.requestId,
+      code: 'bridge_disconnected',
+      message: 'Request aborted: the bridge connection dropped while the response was streaming.',
+      fatal: false,
+      ...(turn.turnInput !== null ? { pending_inputs: turn.turnInput.pending() } : {}),
+    });
   }
 
   /**
@@ -1815,6 +1843,15 @@ export class Bridge extends EventEmitter<BridgeEvents> {
       .finally(() => {
         this.activeRequests.delete(request_id);
         turnInput?.end();
+        // An input turn a disconnect aborted is replayed only once it has
+        // ended (see handleWelcome). If the server is back already, that is now.
+        const disconnected = turnInput !== null
+          ? this.disconnectedTurns.find((t) => t.turnInput === turnInput)
+          : undefined;
+        if (disconnected !== undefined) {
+          disconnected.ended = true;
+          if (disconnected.due && this.sessionId !== null) this.replayDisconnectedTurn(disconnected);
+        }
         // Only our own entry: a re-issue under the same id may own it by now.
         if (turnInput !== null && this.turnInputs.get(request_id) === turnInput) {
           this.turnInputs.delete(request_id);

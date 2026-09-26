@@ -884,6 +884,8 @@ On a turn with its input open it also carries **`pending_inputs`**: the `message
 { "type": "cancelled", "request_id": "req_abc123", "pending_inputs": ["msg_42"] }
 ```
 
+The same list rides on the `error` `bridge_disconnected` the bridge replays after a reconnect for a turn the dropped connection aborted (see [Error Response](#bridge--server-error-response)). With `cancelled` and `done`, that makes the accounting exact: **every accepted `turn_input` is either listed in the terminal frame's `pending_inputs` (never read — offer it again if you like) or it was read**, whether or not its `user_input` reached you. A message the assistant read while the socket was down has no `user_input` the server ever saw; it is read all the same, and must not be sent again.
+
 ### Server → Bridge: `turn_input`
 
 A message for a turn that is still running. Only meaningful for a turn whose ack said `input_open: true`.
@@ -1633,6 +1635,14 @@ For request-level errors (not streaming):
 ```
 
 **`fatal`**: Hint to the server whether this error is fatal (`true`) or recoverable (`false`). A `provider_unavailable` error is fatal — no recovery is possible without operator action.
+
+**`bridge_disconnected`** is how a request the dropped connection aborted is reported, once the bridge is back: nothing could be sent over the closed socket, so this is sent after the next `welcome` in place of the turn's terminal frame. On a turn with its input open it carries **`pending_inputs`** — the accepted `turn_input` messages the assistant never read, oldest first, always present and possibly empty — and is sent only once that turn's CLI has actually stopped, which may be a few seconds after the `welcome`, so that the list is final. **Accepted and not listed means read**, even when its `user_input` was lost with the connection.
+
+```json
+{ "type": "error", "request_id": "req_abc123", "code": "bridge_disconnected",
+  "message": "Request aborted: the bridge connection dropped while the response was streaming.",
+  "fatal": false, "pending_inputs": ["msg_43"] }
+```
 
 ---
 

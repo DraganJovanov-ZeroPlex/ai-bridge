@@ -14,6 +14,7 @@ import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
 import { Bridge } from '../../src/bridge.js';
 import { ProviderAdapter, type AdapterStreamEvent, type ExecutionContext } from '../../src/providers/base.js';
 import type { ModelInfo } from '../../src/protocol/types.js';
+import type { TurnInputPort } from '../../src/providers/turn-input.js';
 
 /** Runs until aborted or told to finish, with its input port open. */
 class InputAdapter extends ProviderAdapter {
@@ -43,6 +44,30 @@ class InputAdapter extends ProviderAdapter {
   }
   listModels(): Promise<ModelInfo[]> {
     return Promise.resolve([]);
+  }
+}
+
+/**
+ * Like InputAdapter, but an abort does not end the turn by itself: the test
+ * ends it with finish(), as a real CLI takes a while to stop — and may still
+ * read a queued message on its way out.
+ */
+class SlowStopAdapter extends InputAdapter {
+  port: TurnInputPort | null = null;
+  override execute(context: ExecutionContext, onEvent: (e: AdapterStreamEvent) => void): Promise<string | null> {
+    this.contexts.push(context);
+    this.port = context.turnInput ?? null;
+    this.port?.open((frame) => this.written.push(frame), () => {});
+    onEvent({ event: 'block_start', data: { block_index: 0, block_type: 'text' } });
+
+    return new Promise((resolve) => {
+      this.finish = (): void => {
+        this.port?.end();
+        onEvent({ event: 'done', data: {} });
+        resolve('sess-1');
+      };
+      context.signal.addEventListener('abort', () => this.port?.end(), { once: true });
+    });
   }
 }
 
@@ -258,4 +283,74 @@ describe('turn_input', () => {
     expect(adapter.written).toEqual([]);
     adapter.finish();
   });
+});
+
+describe('a disconnect', () => {
+  /** Drop the socket from the server's side and take the bridge's reconnect, with its welcome. */
+  async function reconnect(): Promise<void> {
+    const next = new Promise<WsSocket>((resolve) => wss.once('connection', resolve));
+    socket.close();
+    const ws = await next;
+    socket = ws;
+    const hellos = frames.filter((f) => f['type'] === 'hello').length;
+    ws.on('message', (raw) => frames.push(JSON.parse(raw.toString()) as Record<string, unknown>));
+    await waitFor(() => frames.filter((f) => f['type'] === 'hello').length > hellos, 'the second hello');
+    ws.send(JSON.stringify({
+      type: 'welcome', session_id: 'conn-2', tools: [],
+      config: { heartbeat_interval: 30, request_timeout: 0, silence_timeout: 0 },
+      cli_isolation: 'workspace',
+    }));
+  }
+
+  const replayFor = (id: string) => waitFor(
+    (f) => f['type'] === 'error' && f['request_id'] === id && f['code'] === 'bridge_disconnected',
+    `the replayed error for ${id}`,
+  );
+
+  it('names in the replayed error the accepted messages the turn never read, counted once it has ended', async () => {
+    const adapter = new SlowStopAdapter('claude');
+    await startBridge([adapter]);
+    request('req_in', { accepts_input: true });
+    await waitFor((f) => f['event'] === 'block_start', 'the turn starting');
+    socket.send(JSON.stringify({ type: 'turn_input', request_id: 'req_in', message_id: 'm1', content: 'one' }));
+    socket.send(JSON.stringify({ type: 'turn_input', request_id: 'req_in', message_id: 'm2', content: 'two' }));
+    await ackFor('req_in', 'm2');
+
+    await reconnect();
+    await new Promise((r) => setTimeout(r, 150));
+    // The server is back, but the turn is still stopping: its CLI may yet read
+    // a queued message, so nothing is reported until it has ended.
+    expect(frames.some((f) => f['type'] === 'error' && f['request_id'] === 'req_in')).toBe(false);
+
+    // It reads m1 on its way out, then is gone.
+    expect(adapter.port!.shiftRead()).toBe('m1');
+    adapter.finish();
+
+    expect(await replayFor('req_in')).toEqual({
+      type: 'error', request_id: 'req_in', code: 'bridge_disconnected',
+      message: expect.any(String) as string, fatal: false, pending_inputs: ['m2'],
+    });
+  }, 10_000);
+
+  it('replays an input turn that already ended at the welcome, with an empty list when all was read', async () => {
+    const adapter = new InputAdapter('claude');
+    await startBridge([adapter]);
+    request('req_in', { accepts_input: true });
+    await waitFor((f) => f['event'] === 'block_start', 'the turn starting');
+
+    await reconnect();
+
+    expect((await replayFor('req_in'))['pending_inputs']).toEqual([]);
+  }, 10_000);
+
+  it('replays any other turn as before, without pending_inputs', async () => {
+    const adapter = new InputAdapter('claude');
+    await startBridge([adapter]);
+    request('req_plain', {});
+    await waitFor((f) => f['event'] === 'block_start', 'the turn starting');
+
+    await reconnect();
+
+    expect('pending_inputs' in (await replayFor('req_plain'))).toBe(false);
+  }, 10_000);
 });

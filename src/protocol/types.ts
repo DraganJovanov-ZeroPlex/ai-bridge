@@ -294,6 +294,13 @@ export interface BridgeErrorMessage {
   code: string;
   message: string;
   fatal: boolean;
+  /**
+   * On `bridge_disconnected` for a turn that ran with its input open: the
+   * `message_id` of every accepted `turn_input` the assistant never read,
+   * oldest first. An accepted message not listed was read. Always present on
+   * such a turn, empty when nothing was pending; absent otherwise.
+   */
+  pending_inputs?: string[];
 }
 
 /**
