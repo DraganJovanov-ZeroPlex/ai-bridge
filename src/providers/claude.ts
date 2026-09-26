@@ -1197,8 +1197,9 @@ const TASK_PHASES: ReadonlyMap<string, TaskPhase> = new Map<string, TaskPhase>([
  *                             call), elapsed_time_seconds — every 30 s
  *
  * Deliberately NOT forwarded: `prompt` (the helper's whole instruction — the
- * largest frame in the family, and a non-terminal frame over the cap is dropped
- * rather than trimmed, so carrying it would risk losing the event entirely) and
+ * largest frame in the family, and a non-terminal frame over the cap is not
+ * trimmed but replaced by a `frame_too_large` stream error, which ends the
+ * turn — so carrying it would put the whole turn at risk) and
  * `output_file` (a path on this machine, which means nothing to a server).
  *
  * @param started every task seen to start in this turn, keyed by task_id —

@@ -923,8 +923,9 @@ export interface TaskUsage {
  * short (stop, timeout, a crashed CLI) sends no `finished` for its helpers.
  *
  * Never carries the helper's instruction text (the CLI's `prompt`): it is the
- * largest frame in the family, and an oversized non-terminal frame is dropped
- * outright rather than trimmed. `description` is what a person reads.
+ * largest frame in the family, and an oversized non-terminal frame is not
+ * trimmed but replaced by a `frame_too_large` stream error, which ends the
+ * turn. `description` is what a person reads.
  */
 export interface TaskData {
   phase: TaskPhase;

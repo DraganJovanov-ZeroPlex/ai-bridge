@@ -1255,7 +1255,7 @@ The life of a **helper** the CLI runs for the main assistant: a sub-agent, or a 
 - **`status`** is the CLI's own word — `completed`, `failed`, `stopped`, `killed` have been seen.
 - **`usage`** is the helper's running total: `total_tokens`, `tool_uses`, `duration_ms`, each present when the CLI reported it.
 - **`summary`** is the helper's closing report, meant to be shown. It is bounded to **8 KB** (JSON-encoded), cut on a character boundary and ending in a `…[truncated by the bridge: showing N of M characters]` marker when cut. `description` has the same bound.
-- **The helper's instructions are never sent.** The CLI reports the helper's whole prompt at `started`; it is the largest frame in the family, and a non-terminal frame over the frame cap is dropped outright rather than trimmed, so forwarding it would risk losing the event. `description` is what a person reads. Local file paths the CLI reports (the helper's output file) are not forwarded either.
+- **The helper's instructions are never sent.** The CLI reports the helper's whole prompt at `started`; it is the largest frame in the family, and a non-terminal frame over the frame cap is not trimmed: the bridge sends a `frame_too_large` stream `error` in its place, which ends the turn. Forwarding the prompt would put the whole turn at risk. `description` is what a person reads. Local file paths the CLI reports (the helper's output file) are not forwarded either.
 - A `task` event counts as activity for the bridge's silence bound, like every other event. A helper busy in one long step keeps a turn alive through its heartbeats.
 
 Carried by the Claude adapter; Codex and Gemini never send it. A consumer that does not know the event ignores it.
