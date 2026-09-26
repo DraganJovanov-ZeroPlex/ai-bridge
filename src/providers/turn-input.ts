@@ -9,10 +9,11 @@
  * that sees the CLI read the message.
  *
  * One port per turn. The bridge creates it before the turn runs; the adapter
- * opens it once the CLI is spawned and ends it the moment it closes stdin. So
- * the answer to "can this message still reach the assistant?" is always the
- * adapter's, and is given on the same event loop as its decision to close — an
- * accepted message can never be lost to a close in between.
+ * opens it once the CLI has started its session (its first `system/init`) and
+ * ends it the moment it closes stdin. So the answer to "can this message still
+ * reach the assistant?" is always the adapter's, and is given on the same
+ * event loop as its decision to close — an accepted message can never be lost
+ * to a close in between.
  */
 
 import type { TurnInputRejection } from '../protocol/types.js';

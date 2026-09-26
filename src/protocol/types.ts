@@ -660,8 +660,8 @@ export type TurnInputRejection = 'turn_not_running' | 'turn_ending' | 'input_not
  *    it has ended and its terminal frame went out ahead of this ack. The
  *    server starts a normal new turn with it.
  *  - `input_not_open`: the turn is running but cannot take it (it was not
- *    started with `accepts_input`, or the CLI has not started yet), so the
- *    server holds it until the turn is over.
+ *    started with `accepts_input`, or the CLI has not reached its first
+ *    `system/init` yet), so the server holds it until the turn is over.
  */
 export interface TurnInputAckMessage {
   type: 'turn_input_ack';

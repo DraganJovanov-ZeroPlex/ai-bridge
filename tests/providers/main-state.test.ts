@@ -25,7 +25,8 @@ async function replayWithInjections(fixture: string): Promise<AdapterStreamEvent
     steps,
     message: opening,
     onEvent: (event: AdapterStreamEvent, port: TurnInputPort) => {
-      if (offered || event.event !== 'main_state') return;
+      // At the first event once input is open (the CLI's first init).
+      if (offered || !port.isOpen()) return;
       offered = true;
       injected.forEach((content, i) => port.offer(`m${i + 1}`, content));
     },

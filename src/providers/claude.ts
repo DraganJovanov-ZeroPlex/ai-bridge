@@ -510,18 +510,26 @@ export class ClaudeAdapter extends ProviderAdapter {
         closeInput('idle, no task running, no message pending');
       };
 
-      if (acceptsInput) {
-        if (child.stdin) {
-          const stdin = child.stdin;
-          port!.open(
-            (frame) => { stdin.write(frame); },
-            // An accepted message is activity: the person is talking to the
-            // turn, whatever the CLI is doing.
-            () => { timeouts?.notice(); },
-          );
-        }
-        setMain('working');
-      }
+      /**
+       * Start taking messages. Called at the CLI's FIRST `system/init`, not at
+       * spawn: until then the CLI may yet fail before it has a session — a
+       * resumed session it cannot find ends the process there — and a message
+       * accepted into that process vanishes, because the bridge re-issues the
+       * turn as a fresh one without it. Before init an offer is answered
+       * `input_not_open`, and the server holds the message.
+       */
+      const openInput = (): void => {
+        if (!acceptsInput || !child.stdin || stdinClosed) return;
+        const stdin = child.stdin;
+        port!.open(
+          (frame) => { stdin.write(frame); },
+          // An accepted message is activity: the person is talking to the
+          // turn, whatever the CLI is doing.
+          () => { timeouts?.notice(); },
+        );
+      };
+
+      if (acceptsInput) setMain('working');
 
       // Two clocks: silence, which kills, and a wall-clock backstop. Without
       // either a wedged CLI would run forever.
@@ -699,6 +707,7 @@ export class ClaudeAdapter extends ProviderAdapter {
             notificationOwed = false;
             setMain('working');
           }
+          if (!seenInit) openInput();
           seenInit = true;
           return;
         }

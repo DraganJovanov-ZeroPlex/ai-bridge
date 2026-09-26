@@ -39,12 +39,15 @@ const BACKGROUND_BASH = 'claude-input-background-bash-turn.ndjson';
 const BACKGROUND_HELPER = 'claude-input-background-helper-turn.ndjson';
 const FOREGROUND_BASH = 'claude-input-redirect-foreground-bash-turn.ndjson';
 
-/** Offer every injected message once, as soon as the CLI is running. */
+/**
+ * Offer every injected message once, as soon as the turn takes them: at the
+ * first event after the CLI's first init, which is when input opens.
+ */
 function offerAtStart(injected: string[], results: Array<{ status: string }>) {
   let offered = false;
 
-  return (event: { event: string }, port: TurnInputPort): void => {
-    if (offered || event.event !== 'main_state') return;
+  return (_event: { event: string }, port: TurnInputPort): void => {
+    if (offered || !port.isOpen()) return;
     offered = true;
     injected.forEach((content, i) => results.push(port.offer(`m${i + 1}`, content)));
   };
@@ -339,6 +342,48 @@ describe('the port', () => {
     expect(port.offer('c', 'hi')).toEqual({ status: 'rejected', reason: 'turn_ending' });
     // What was accepted and not read survives the end, for the terminal frame.
     expect(port.pending()).toEqual(['b']);
+  });
+
+  it('opens only at the CLI\'s first init: input_not_open before, accepted after', async () => {
+    const outcomes: Array<{ status: string; reason?: string }> = [];
+    const turn = await runInputTurn({
+      message: 'go',
+      steps: [
+        echo('go'), { sleep: 100 }, init, text('first'),
+        { waitInput: 2 }, echo('later'), init, text('second'), result(), { waitEof: true },
+      ],
+      onEvent: (e, port) => {
+        // The spawn's `working` comes before init; the text block after it.
+        if (outcomes.length === 0 && e.event === 'main_state') outcomes.push(port.offer('early', 'early'));
+        if (outcomes.length === 1 && e.event === 'block_start') outcomes.push(port.offer('later', 'later'));
+      },
+    });
+
+    expect(outcomes).toEqual([{ status: 'rejected', reason: 'input_not_open' }, { status: 'accepted' }]);
+    expect(of(turn.events, 'user_input').map((e) => e.data)).toEqual([{ message_id: 'later' }]);
+  });
+
+  it('takes no message into a CLI that fails before it has a session', async () => {
+    // A resumed session that is gone ends the process before init. A message
+    // accepted into it would vanish: the turn is re-issued fresh without it.
+    const outcomes: Array<{ status: string; reason?: string }> = [];
+    const turn = await runInputTurn({
+      message: 'go',
+      cliSessionId: 'sess_gone',
+      steps: [
+        { sleep: 100 },
+        line({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1',
+          errors: ['No conversation found with session ID: sess_gone'] }),
+        { exit: 1 },
+      ],
+      onEvent: (e, port) => {
+        if (e.event === 'main_state' && outcomes.length === 0) outcomes.push(port.offer('m1', 'hello?'));
+      },
+    });
+
+    expect(outcomes).toEqual([{ status: 'rejected', reason: 'input_not_open' }]);
+    expect(turn.record.frames).toHaveLength(1);
+    expect(of(turn.events, 'error')[0].data).toMatchObject({ code: 'session_lost' });
   });
 
   it('writes a message once, however often it is offered, and answers every retry as the first', () => {

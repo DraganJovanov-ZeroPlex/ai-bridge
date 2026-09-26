@@ -100,8 +100,8 @@ export interface ExecutionContext {
   /**
    * Present when this turn runs with its input open (`options.accepts_input`,
    * confirmed by the ack's `input_open`). The adapter keeps the CLI's stdin
-   * open, opens the port once the CLI is running, and ends it when it closes
-   * stdin. Absent or null: the turn runs exactly as it always did.
+   * open, opens the port once the CLI has started its session, and ends it
+   * when it closes stdin. Absent or null: the turn runs exactly as it always did.
    */
   turnInput?: TurnInputPort | null;
 }
