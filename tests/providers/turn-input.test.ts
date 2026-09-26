@@ -206,6 +206,65 @@ describe('messages for a running turn', () => {
     expect(turn.port.pending()).toEqual([]);
   });
 
+  it('takes only a replayed frame with the message\'s text as its echo', async () => {
+    // The CLI writes user frames of its own (after a compaction, say). Taken
+    // for the head message's echo, one would report a message read that the
+    // assistant never saw, and credit the real echo to the next message.
+    let offered = false;
+    const own = (content: string, replay?: boolean): Step => line({
+      type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: 's1',
+      ...(replay === undefined ? {} : { isReplay: replay }),
+    });
+    const turn = await runInputTurn({
+      message: 'go',
+      steps: [
+        echo('go'), init, text('first', null),
+        { waitInput: 3 },
+        own('This session is being continued from a previous conversation…'),
+        own('[compacted summary]', true),
+        text('meanwhile', null),
+        echo('one'), echo('two'), init, text('answered'), result(), { waitEof: true },
+      ],
+      onEvent: (e, port) => {
+        if (!offered && e.event === 'block_start') {
+          offered = true;
+          port.offer('m1', 'one');
+          port.offer('m2', 'two');
+        }
+      },
+    });
+
+    // Only the two real echoes, in order, each credited to its own message,
+    // and user_input for m1 only once its own echo arrived.
+    expect(of(turn.events, 'user_input').map((e) => e.data)).toEqual([{ message_id: 'm1' }, { message_id: 'm2' }]);
+    const names = turn.events.map((e) => e.event);
+    const meanwhile = turn.events.findIndex((e) => e.event === 'block_delta'
+      && (e.data as { content?: string }).content === 'meanwhile');
+    expect(meanwhile).toBeGreaterThan(-1);
+    expect(names.indexOf('user_input')).toBeGreaterThan(meanwhile);
+  });
+
+  it('accounts for two messages the CLI folds into one echo', async () => {
+    let offered = false;
+    const turn = await runInputTurn({
+      message: 'go',
+      steps: [
+        echo('go'), init, text('first', null), { waitInput: 3 },
+        echo('one\n\ntwo'), init, text('answered'), result(), { waitEof: true },
+      ],
+      onEvent: (e, port) => {
+        if (!offered && e.event === 'block_start') {
+          offered = true;
+          port.offer('m1', 'one');
+          port.offer('m2', 'two');
+        }
+      },
+    });
+
+    expect(of(turn.events, 'user_input').map((e) => e.data)).toEqual([{ message_id: 'm1' }, { message_id: 'm2' }]);
+    expect(turn.port.pending()).toEqual([]);
+  });
+
   it('reads a message sent during a foreground step after that step (captured redirect)', async () => {
     const { steps, lines, opening, injected } = stepsFromFixture(FOREGROUND_BASH);
     expect(injected).toEqual(['stop and answer 6×7 instead']);

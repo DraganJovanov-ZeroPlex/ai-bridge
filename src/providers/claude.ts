@@ -776,13 +776,33 @@ export class ClaudeAdapter extends ProviderAdapter {
 
               return;
             }
-            const messageId = port?.shiftRead();
-            if (messageId === undefined) {
-              log.debug('An echoed message matched nothing pending', { requestId });
+            // Matched on text, not taken on order alone: the CLI writes user
+            // frames of its own too (after a compaction, say), and taking one
+            // for the head message's echo would report a message read that
+            // the assistant has not seen — and then the real echo would be
+            // credited to the NEXT message. Every pending message whose text
+            // the echo contains, in order, is read, so a CLI that ever folds
+            // two queued messages into one frame still accounts for both.
+            // Trimmed, so a CLI that tidies whitespace still matches.
+            const read: string[] = [];
+            let rest = text;
+            for (let head = port?.peekContent(); head !== undefined; head = port?.peekContent()) {
+              const at = rest.indexOf(head.trim());
+              if (at < 0) break;
+              rest = rest.slice(at + head.trim().length);
+              read.push(port!.shiftRead()!);
+            }
+            if (read.length === 0) {
+              log.debug('A replayed user frame matched no pending message — not an echo of ours', {
+                requestId,
+                pending: port?.pendingCount() ?? 0,
+              });
 
               return;
             }
-            emitWholeMessage({ event: 'user_input', data: { message_id: messageId } });
+            for (const messageId of read) {
+              emitWholeMessage({ event: 'user_input', data: { message_id: messageId } });
+            }
             // Read means about to be answered: working from here, so the
             // close decision cannot slip in before its first word.
             setMain('working');
@@ -1367,15 +1387,18 @@ function queuedWorkOrigin(result: Record<string, unknown>): string | null {
 }
 
 /**
- * Is this `user` frame the CLI echoing a message it took from stdin?
+ * Could this `user` frame be the CLI echoing a message it took from stdin?
  *
  * `--replay-user-messages` echoes each one with no `parent_tool_use_id`, no
  * tool result, and `isReplay: true` (2.1.280). A helper's prompt and every tool
- * result carry one or the other, so they never match.
+ * result carry one or the other, so they never match. `isReplay` must be
+ * present and true: a user frame the CLI writes on its own account does not
+ * carry it, and must not be taken for an echo. The caller still matches the
+ * text against what was written.
  */
 function isInputEcho(frame: Record<string, unknown>, content: unknown): boolean {
   if (parentOf(frame).parent_tool_use_id !== undefined) return false;
-  if (frame['isReplay'] === false) return false;
+  if (frame['isReplay'] !== true) return false;
   if (Array.isArray(content)) {
     return !content.some((e) => typeof e === 'object' && e !== null
       && (e as Record<string, unknown>)['type'] === 'tool_result');
