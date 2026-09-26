@@ -429,6 +429,111 @@ describe('the task event', () => {
   });
 });
 
+// ── Shapes the fixtures do not cover ───────────────────────────────────
+//
+// Built from the captured frame shapes above, not captured whole: a helper's
+// helper, two helpers at once, and a shell the MAIN assistant backgrounds.
+
+describe('the task event, beyond one helper', () => {
+  it('keeps a helper\'s own helper apart from it (depth 2)', async () => {
+    // The inner helper is spawned by the OUTER helper's Agent call, so its
+    // `tool_use_id` is that call — itself marked as the outer helper's block.
+    const events = await replay({
+      lines: [
+        { type: 'system', subtype: 'init', session_id: 's' },
+        { type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', content: [
+          { type: 'tool_use', id: 'toolu_outer', name: 'Agent', input: {} }] } },
+        { type: 'system', subtype: 'task_started', task_id: 'outer', tool_use_id: 'toolu_outer',
+          task_type: 'local_agent', spawn_depth: 1, is_backgrounded: false },
+        { type: 'assistant', parent_tool_use_id: 'toolu_outer', message: { id: 'm2', content: [
+          { type: 'tool_use', id: 'toolu_inner', name: 'Agent', input: {} }] } },
+        { type: 'system', subtype: 'task_started', task_id: 'inner', tool_use_id: 'toolu_inner',
+          task_type: 'local_agent', spawn_depth: 2, is_backgrounded: false },
+        { type: 'tool_progress', tool_name: 'Agent', parent_tool_use_id: 'toolu_outer', elapsed_time_seconds: 30, heartbeat: true },
+        { type: 'tool_progress', tool_name: 'Agent', parent_tool_use_id: 'toolu_inner', elapsed_time_seconds: 30, heartbeat: true },
+        { type: 'system', subtype: 'task_notification', task_id: 'inner', tool_use_id: 'toolu_inner', status: 'completed' },
+        { type: 'system', subtype: 'task_notification', task_id: 'outer', tool_use_id: 'toolu_outer', status: 'completed' },
+        { type: 'result', subtype: 'success', session_id: 's', usage: {} },
+      ],
+    });
+
+    const innerCall = of(events, 'block_start').map(data).find((d) => d['tool_call_id'] === 'toolu_inner')!;
+    expect(innerCall['parent_tool_use_id']).toBe('toolu_outer');
+
+    const life = tasks(events).map((t) => [t.task_id, t.phase, t.tool_use_id]);
+    expect(life).toEqual([
+      ['outer', 'started', 'toolu_outer'],
+      ['inner', 'started', 'toolu_inner'],
+      ['outer', 'heartbeat', 'toolu_outer'],
+      ['inner', 'heartbeat', 'toolu_inner'],
+      ['inner', 'finished', 'toolu_inner'],
+      ['outer', 'finished', 'toolu_outer'],
+    ]);
+    expect(tasks(events).filter((t) => t.phase === 'started').map((t) => t.spawn_depth)).toEqual([1, 2]);
+  });
+
+  it('attributes each heartbeat to its own helper when two run at once', async () => {
+    const events = await replay({
+      lines: [
+        { type: 'system', subtype: 'init', session_id: 's' },
+        { type: 'system', subtype: 'task_started', task_id: 'a', tool_use_id: 'toolu_a', task_type: 'local_agent', is_backgrounded: false },
+        { type: 'system', subtype: 'task_started', task_id: 'b', tool_use_id: 'toolu_b', task_type: 'local_agent', is_backgrounded: false },
+        { type: 'tool_progress', tool_name: 'Agent', parent_tool_use_id: 'toolu_b', elapsed_time_seconds: 30, heartbeat: true },
+        { type: 'tool_progress', tool_name: 'Agent', parent_tool_use_id: 'toolu_a', elapsed_time_seconds: 30, heartbeat: true },
+        { type: 'system', subtype: 'task_progress', task_id: 'a', tool_use_id: 'toolu_a', last_tool_name: 'Read' },
+        { type: 'system', subtype: 'task_updated', task_id: 'b', patch: { status: 'completed' } },
+        { type: 'system', subtype: 'task_notification', task_id: 'b', tool_use_id: 'toolu_b', status: 'completed' },
+        { type: 'tool_progress', tool_name: 'Agent', parent_tool_use_id: 'toolu_a', elapsed_time_seconds: 60, heartbeat: true },
+        { type: 'system', subtype: 'task_notification', task_id: 'a', tool_use_id: 'toolu_a', status: 'failed' },
+        { type: 'result', subtype: 'success', session_id: 's', usage: {} },
+      ],
+    });
+
+    const byTask = (id: string) => tasks(events).filter((t) => t.task_id === id);
+    expect(byTask('a').map((t) => [t.phase, t.tool_use_id, t.elapsed_seconds ?? t.status ?? null])).toEqual([
+      ['started', 'toolu_a', null],
+      ['heartbeat', 'toolu_a', 30],
+      ['progress', 'toolu_a', null],
+      ['heartbeat', 'toolu_a', 60],
+      ['finished', 'toolu_a', 'failed'],
+    ]);
+    expect(byTask('b').map((t) => [t.phase, t.tool_use_id, t.elapsed_seconds ?? t.status ?? null])).toEqual([
+      ['started', 'toolu_b', null],
+      ['heartbeat', 'toolu_b', 30],
+      ['updated', 'toolu_b', 'completed'],
+      ['finished', 'toolu_b', 'completed'],
+    ]);
+  });
+
+  it('reports a shell the MAIN assistant backgrounds, keyed by its unmarked call, and ends with the turn', async () => {
+    // `run_in_background` on the main assistant's own Bash call: a `local_bash`
+    // task whose call carries no parent. The CLI writes its `result` while the
+    // shell still runs, so no `finished` reaches the server — `done` is what
+    // ends the task (PROTOCOL.md: the request's terminal frame ends them all).
+    const events = await replay({
+      lines: [
+        { type: 'system', subtype: 'init', session_id: 's' },
+        { type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', content: [
+          { type: 'tool_use', id: 'toolu_bash', name: 'Bash', input: { command: 'sleep 600', run_in_background: true } }] } },
+        { type: 'system', subtype: 'task_started', task_id: 'sh1', tool_use_id: 'toolu_bash',
+          task_type: 'local_bash', description: 'sleep 600', is_backgrounded: true },
+        { type: 'user', parent_tool_use_id: null, message: { content: [
+          { type: 'tool_result', tool_use_id: 'toolu_bash', content: 'Command running in background with ID: sh1' }] } },
+        { type: 'assistant', parent_tool_use_id: null, message: { id: 'm2', content: [{ type: 'text', text: 'Started it.' }] } },
+        { type: 'result', subtype: 'success', session_id: 's', usage: {} },
+        { type: 'system', subtype: 'task_notification', task_id: 'sh1', tool_use_id: 'toolu_bash', status: 'killed' },
+      ],
+    });
+
+    const bashCall = of(events, 'block_start').map(data).find((d) => d['tool_call_id'] === 'toolu_bash')!;
+    expect('parent_tool_use_id' in bashCall).toBe(false);
+    expect(tasks(events)).toEqual([expect.objectContaining({
+      phase: 'started', task_id: 'sh1', tool_use_id: 'toolu_bash', task_type: 'local_bash', is_backgrounded: true,
+    })]);
+    expect(events.at(-1)!.event).toBe('done');
+  });
+});
+
 // ── Size ───────────────────────────────────────────────────────────────
 
 describe('a task frame stays small', () => {
