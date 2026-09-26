@@ -918,6 +918,10 @@ export interface TaskUsage {
  * at once, while the helper works on — possibly after the main assistant has
  * written its whole reply.
  *
+ * And the request's terminal frame — `done`, a stream `error`, or `cancelled` —
+ * ends every task of that request whatever phase it last reported: a turn cut
+ * short (stop, timeout, a crashed CLI) sends no `finished` for its helpers.
+ *
  * Never carries the helper's instruction text (the CLI's `prompt`): it is the
  * largest frame in the family, and an oversized non-terminal frame is dropped
  * outright rather than trimmed. `description` is what a person reads.
