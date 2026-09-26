@@ -251,13 +251,74 @@ describe('messages for a running turn', () => {
       steps: [
         echo('go'), init, text('x'),
         line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['overloaded'], session_id: 's1' }),
-        { waitEof: true },
+        // The real CLI exits 1 after an error result (2.1.283). A stand-in
+        // that exited 0 here is what hid the exit-code branch reporting a
+        // bare provider_error and an empty done in its place.
+        { exit: 1 },
       ],
     });
 
     const names = turn.events.map((e) => e.event);
     expect(names.slice(-2)).toEqual(['error', 'done']);
+    expect(of(turn.events, 'error')).toHaveLength(1);
     expect(of(turn.events, 'error')[0].data).toMatchObject({ code: 'provider_error', message: 'overloaded' });
+    expect((of(turn.events, 'done')[0].data as DoneData)['subtype' as keyof DoneData]).toBe('error_during_execution');
+  });
+
+  it('reports a missing resumed session as session_lost, with usage, though the CLI exits 1', async () => {
+    // The server re-issues a `session_lost` turn fresh, silently; as a
+    // provider_error the person would see an error instead.
+    const turn = await runInputTurn({
+      message: 'go',
+      cliSessionId: 'sess_gone',
+      steps: [
+        line({
+          type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', num_turns: 0,
+          errors: ['No conversation found with session ID: sess_gone'],
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        }),
+        { exit: 1 },
+      ],
+    });
+
+    expect(of(turn.events, 'error').map((e) => e.data)).toEqual([
+      { code: 'session_lost', message: 'No conversation found with session ID: sess_gone' },
+    ]);
+    const done = of(turn.events, 'done');
+    expect(done).toHaveLength(1);
+    expect((done[0].data as DoneData).usage).toEqual({
+      input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+    });
+  });
+
+  it('keeps what a failed turn spent: usage and turns summed over every result, exit 1 or not', async () => {
+    const turn = await runInputTurn({
+      message: 'go',
+      steps: [
+        echo('go'), init, text('first'), result(), init, text('second'),
+        result({ subtype: 'error_max_turns', is_error: true, errors: ['Reached maximum number of turns (2)'], num_turns: 2 }),
+        { exit: 1 },
+      ],
+    });
+
+    expect(of(turn.events, 'error')[0].data).toMatchObject({ code: 'provider_error' });
+    const data = of(turn.events, 'done')[0].data as DoneData;
+    expect(data.num_turns).toBe(3);
+    expect(data.usage).toEqual({
+      input_tokens: 2, output_tokens: 4, cache_creation_input_tokens: 6, cache_read_input_tokens: 8,
+    });
+  });
+
+  it('still reports a CLI that died mid-turn, on a result that said all was well, as a crash', async () => {
+    // stdin still open (a background task runs) and the last result a success:
+    // nothing explains the exit, so it is not dressed up as a finished turn.
+    const turn = await runInputTurn({
+      message: 'go',
+      steps: [echo('go'), init, taskStarted('t1', 'local_bash', true), text('started'), result(), { sleep: 50 }, { exit: 3 }],
+    });
+
+    expect(of(turn.events, 'error')[0].data).toMatchObject({ code: 'provider_error' });
+    expect(turn.events.at(-1)!.event).toBe('done');
   });
 });
 

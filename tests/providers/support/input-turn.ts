@@ -28,7 +28,12 @@ export type Step =
   | { line: string }
   | { waitInput: number }
   | { sleep: number }
-  | { waitEof: true };
+  | { waitEof: true }
+  /**
+   * Stop here and exit with this code, as the real CLI does after an error
+   * `result` (exit 1, checked on 2.1.283) — without waiting for stdin to close.
+   */
+  | { exit: number };
 
 const STAND_IN = `
 const fs = require('fs');
@@ -68,6 +73,9 @@ process.on('SIGINT', () => { save(); process.exit(130); });
       await sleep(s.sleep);
     } else if (s.waitEof) {
       await until(() => eof, 8000);
+    } else if (s.exit !== undefined) {
+      save();
+      process.exit(s.exit);
     }
   }
   save();
@@ -141,6 +149,8 @@ export async function runInputTurn(opts: {
   onEvent?: (event: AdapterStreamEvent, port: TurnInputPort) => void;
   signal?: AbortSignal;
   withPort?: boolean;
+  /** The session the turn resumes; null (the default) for a fresh one. */
+  cliSessionId?: string | null;
 }): Promise<InputTurn> {
   const scratch = mkdtempSync(join(tmpdir(), 'input-turn-'));
   const stepsPath = join(scratch, 'steps.json');
@@ -185,7 +195,7 @@ export async function runInputTurn(opts: {
     message: opts.message,
     system_prompt: null,
     options: { accepts_input: opts.withPort !== false },
-    cli_session_id: null,
+    cli_session_id: opts.cliSessionId ?? null,
   };
 
   const events: AdapterStreamEvent[] = [];
@@ -200,7 +210,7 @@ export async function runInputTurn(opts: {
       signal: opts.signal ?? new AbortController().signal,
       requestTimeoutSeconds: 60,
       silenceTimeoutSeconds: 0,
-      cliSessionId: null,
+      cliSessionId: opts.cliSessionId ?? null,
       attachmentDir: null,
       bridgeEnv: {},
       bridgeAddendum: null,

@@ -166,6 +166,20 @@ export function createFinalizer(opts: {
    * telling the server the turn produced nothing.
    */
   recoverTerminal?: () => boolean;
+  /**
+   * For a turn that no terminal frame ends — the process exiting is the end —
+   * settle it from what the CLI reported, BEFORE the exit code is judged.
+   *
+   * Returns true if it emitted the terminal events itself. Consulted after a
+   * timeout and a cancel (those are ours, and say so) and ahead of the
+   * non-zero-exit branch, because such a CLI exits non-zero exactly when it
+   * has something to say: Claude Code exits 1 after writing an error `result`
+   * (checked on 2.1.283). Judged by the exit code first, that result — a lost
+   * session the server would silently recover from, a max-turns or overload
+   * with the usage it spent — was reported as a bare `provider_error` and an
+   * empty `done`.
+   */
+  settleFromExit?: (exitCode: number | null) => boolean;
 }): { onRlClose: () => void; onChildClose: (code: number | null) => void } {
   let rlClosed = false;
   let childExitCode: number | null = null;
@@ -220,6 +234,8 @@ export function createFinalizer(opts: {
       // A person who pressed stop then sees an error they caused and cannot
       // act on. What the turn produced has already been sent; this ends it.
       opts.onEvent({ event: 'done', data: {} });
+    } else if (opts.settleFromExit?.(childExitCode) === true) {
+      // Settled from the CLI's own report; see settleFromExit.
     } else if (childExitCode !== 0 && childExitCode !== null) {
       opts.onEvent({
         event: 'error',

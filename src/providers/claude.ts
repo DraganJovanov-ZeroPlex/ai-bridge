@@ -565,6 +565,26 @@ export class ClaudeAdapter extends ProviderAdapter {
       // the probe cache once per stderr chunk.
       let noticedFlagRejection = false;
 
+      /**
+       * End an input-open turn from the one result standing for all it wrote:
+       * an error first when that result failed — `session_lost` when a resumed
+       * session was missing, so the server re-issues it fresh — then a `done`
+       * carrying what the turn spent either way.
+       */
+      const settleFromResults = (combined: Record<string, unknown>): void => {
+        if (combined['is_error'] === true) {
+          const errs = Array.isArray(combined['errors']) ? combined['errors'] : [];
+          const errText = errs.length > 0
+            ? errs.join('; ')
+            : String(combined['subtype'] ?? 'Claude reported an error');
+          onEvent({
+            event: 'error',
+            data: { code: resumeAwareErrorCode(context.cliSessionId, errText), message: errText },
+          });
+        }
+        onEvent({ event: 'done', data: doneDataFrom(combined, model, providerVersion) });
+      };
+
       const finalizer = createFinalizer({
         providerName: 'claude',
         terminalEvent: 'result',
@@ -592,23 +612,30 @@ export class ClaudeAdapter extends ProviderAdapter {
         // its own queued work. That judgement was wrong, or the CLI changed:
         // report the last one rather than "the AI returned no response", which
         // would throw away a turn we have in hand.
-        recoverTerminal: () => {
-          // An input-open turn ends HERE on the ordinary path: no result
-          // settles it, and the process exiting after stdin closed is the end.
-          if (acceptsInput) {
+        // An input-open turn ends HERE on the ordinary path: no result settles
+        // it, and the process exiting is the end. Settled from every result it
+        // wrote, whatever the exit code, when that exit is explained: we closed
+        // stdin (the turn was over by the terminal rule), or the last result
+        // is an error — after which the CLI exits 1 (2.1.283). Only an
+        // unexplained non-zero exit — the CLI died while the turn was still
+        // open, on a result that said all was well — is left to the finalizer
+        // to report as the crash it is.
+        settleFromExit: acceptsInput
+          ? (exitCode) => {
             if (results.length === 0) return false;
             const combined = combineResults(results);
-            if (combined['is_error'] === true) {
-              const errs = Array.isArray(combined['errors']) ? combined['errors'] : [];
-              const errText = errs.length > 0
-                ? errs.join('; ')
-                : String(combined['subtype'] ?? 'Claude reported an error');
-              onEvent({
-                event: 'error',
-                data: { code: resumeAwareErrorCode(context.cliSessionId, errText), message: errText },
-              });
-            }
-            onEvent({ event: 'done', data: doneDataFrom(combined, model, providerVersion) });
+            if (exitCode !== 0 && !stdinClosed && combined['is_error'] !== true) return false;
+            settleFromResults(combined);
+
+            return true;
+          }
+          : undefined,
+        recoverTerminal: () => {
+          // An input-open turn whose CLI died of a signal nobody sent: what it
+          // reported is still the best account of the turn.
+          if (acceptsInput) {
+            if (results.length === 0) return false;
+            settleFromResults(combineResults(results));
 
             return true;
           }
